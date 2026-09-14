@@ -1,0 +1,50 @@
+# Tooling configuration only. Dependencies live in requirements*.txt.
+
+[tool.ruff]
+target-version = "py312"
+line-length = 90
+src = ["app", "tests"]
+exclude = [".venv", "app/db/migrations/versions"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "SIM",  # simplify
+    "RUF",
+]
+ignore = [
+    "B008",   # FastAPI relies on function calls in argument defaults.
+    "UP046",  # PEP 695 generics interact badly with Pydantic generic models.
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]
+"app/db/base.py" = ["E402", "F401"]  # Model registry imports are deliberate.
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+strict = true
+warn_return_any = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+exclude = ["\\.venv", "app/db/migrations/versions"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q --strict-markers"
+filterwarnings = ["error::DeprecationWarning"]

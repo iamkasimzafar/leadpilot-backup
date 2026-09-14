@@ -1,0 +1,14 @@
+# Development and test tooling. Installs runtime deps too.
+# Use this locally; production images install requirements.txt only.
+
+-r requirements.txt
+
+# --- Tests -------------------------------------------------------------------
+pytest==9.1.1
+pytest-asyncio==1.4.0
+pytest-cov==6.2.1
+httpx==0.28.1
+
+# --- Quality -----------------------------------------------------------------
+ruff==0.16.7
+mypy==2.3.1

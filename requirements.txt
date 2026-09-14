@@ -1,0 +1,29 @@
+# Runtime dependencies. Exact pins for reproducible installs.
+# Verified against PyPI 2026-09-14. Dev/test tooling lives in requirements-dev.txt.
+
+# --- Web framework -----------------------------------------------------------
+fastapi==0.141.1
+uvicorn[standard]==0.53.0
+python-multipart==0.0.32
+
+# --- Settings & validation ---------------------------------------------------
+pydantic==2.13.5
+pydantic-settings==2.15.0
+email-validator==2.3.0
+
+# --- Database ----------------------------------------------------------------
+sqlalchemy[asyncio]==2.0.52
+alembic==1.20.0
+asyncpg==0.31.0
+# Async SQLite driver, for the test suite and zero-setup local runs.
+aiosqlite==0.20.0
+
+# --- Security ----------------------------------------------------------------
+# PyJWT over python-jose: actively maintained, and what FastAPI's docs use.
+pyjwt==2.14.0
+# bcrypt used directly. passlib is unmaintained (last release 2020) and breaks
+# against bcrypt>=4.1.
+bcrypt==5.0.0
+
+# --- Logging -----------------------------------------------------------------
+structlog==26.1.0
