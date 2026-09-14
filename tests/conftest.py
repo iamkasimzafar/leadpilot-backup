@@ -11,7 +11,9 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from app.db.base import Base
+# Import Base from the registry, not app.db.base: the registry imports every
+# model, so Base.metadata is populated and create_all builds the full schema.
+from app.db.registry import Base
 from app.db.session import get_db
 from app.main import create_app
 

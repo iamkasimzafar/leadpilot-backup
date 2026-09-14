@@ -1,20 +1,27 @@
 """Application settings, loaded from the environment via pydantic-settings."""
 
+import json
 from functools import lru_cache
 from typing import Annotated, Any, Literal
+from urllib.parse import quote_plus
 
-from pydantic import AnyHttpUrl, BeforeValidator, PostgresDsn, computed_field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AnyHttpUrl, BeforeValidator, computed_field
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 def _split_csv(value: Any) -> Any:
     """Allow CORS origins to be given as a comma-separated string or a JSON list."""
-    if isinstance(value, str) and not value.startswith("["):
-        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.startswith("["):
+            return json.loads(raw)
+        return [item.strip() for item in raw.split(",") if item.strip()]
     return value
 
 
-CorsOrigins = Annotated[list[AnyHttpUrl], BeforeValidator(_split_csv)]
+# NoDecode stops pydantic-settings from running json.loads on the raw env value
+# before _split_csv sees it -- without it, a plain comma-separated string fails.
+CorsOrigins = Annotated[list[AnyHttpUrl], NoDecode, BeforeValidator(_split_csv)]
 
 
 class Settings(BaseSettings):
@@ -43,12 +50,37 @@ class Settings(BaseSettings):
     # The Vite dev server origin. Override in .env for other environments.
     BACKEND_CORS_ORIGINS: CorsOrigins = []
 
-    # --- Database ----------------------------------------------------------
-    POSTGRES_SERVER: str = "localhost"
-    POSTGRES_PORT: int = 5432
-    POSTGRES_USER: str = "postgres"
-    POSTGRES_PASSWORD: str = "postgres"
-    POSTGRES_DB: str = "leadpilot"
+    # --- Frontend ----------------------------------------------------------
+    # Used to build the links we email out (password reset, email verification).
+    FRONTEND_URL: str = "http://localhost:5173"
+
+    # --- Email (SMTP) ------------------------------------------------------
+    # With EMAIL_ENABLED=false nothing is sent: the message is logged instead,
+    # so the whole flow is testable locally without credentials.
+    EMAIL_ENABLED: bool = False
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_STARTTLS: bool = True
+    SMTP_TIMEOUT: int = 15
+    EMAIL_FROM_ADDRESS: str = ""
+    EMAIL_FROM_NAME: str = "LeadPilot"
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def email_from(self) -> str:
+        """RFC 5322 From header. Gmail rewrites a From that isn't the SMTP user,
+        so fall back to SMTP_USER when no explicit address is configured."""
+        address = self.EMAIL_FROM_ADDRESS or self.SMTP_USER
+        return f"{self.EMAIL_FROM_NAME} <{address}>" if address else self.EMAIL_FROM_NAME
+
+    # --- Database (MySQL) --------------------------------------------------
+    MYSQL_HOST: str = "127.0.0.1"
+    MYSQL_PORT: int = 3306
+    MYSQL_USER: str = "root"
+    MYSQL_PASSWORD: str = ""
+    MYSQL_DB: str = "LeadPilot"
 
     # Set this to override the assembled URL entirely (e.g. a hosted DB, or
     # "sqlite+aiosqlite:///./leadpilot.db" for a zero-setup local run).
@@ -57,21 +89,18 @@ class Settings(BaseSettings):
     SQL_ECHO: bool = False
     DB_POOL_SIZE: int = 5
     DB_MAX_OVERFLOW: int = 10
+    DB_POOL_RECYCLE: int = 3600  # MySQL drops idle connections after wait_timeout.
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def sqlalchemy_database_uri(self) -> str:
         if self.DATABASE_URL:
             return self.DATABASE_URL
-        return str(
-            PostgresDsn.build(
-                scheme="postgresql+asyncpg",
-                username=self.POSTGRES_USER,
-                password=self.POSTGRES_PASSWORD,
-                host=self.POSTGRES_SERVER,
-                port=self.POSTGRES_PORT,
-                path=self.POSTGRES_DB,
-            )
+        # quote_plus so passwords containing @ : / # survive URL parsing.
+        password = quote_plus(self.MYSQL_PASSWORD)
+        return (
+            f"mysql+asyncmy://{self.MYSQL_USER}:{password}"
+            f"@{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DB}?charset=utf8mb4"
         )
 
 

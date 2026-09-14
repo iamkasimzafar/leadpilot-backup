@@ -14,7 +14,8 @@ email-validator==2.3.0
 # --- Database ----------------------------------------------------------------
 sqlalchemy[asyncio]==2.0.52
 alembic==1.20.0
-asyncpg==0.31.0
+# Async MySQL driver. Actively maintained and faster than aiomysql.
+asyncmy==0.2.14
 # Async SQLite driver, for the test suite and zero-setup local runs.
 aiosqlite==0.20.0
 

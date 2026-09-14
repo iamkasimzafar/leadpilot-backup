@@ -22,6 +22,9 @@ def _create_engine() -> AsyncEngine:
         kwargs.update(
             pool_size=settings.DB_POOL_SIZE,
             max_overflow=settings.DB_MAX_OVERFLOW,
+            # MySQL closes idle connections (wait_timeout, default 8h). Recycle
+            # below that and check liveness before handing a connection out.
+            pool_recycle=settings.DB_POOL_RECYCLE,
             pool_pre_ping=True,
         )
     return create_async_engine(url, **kwargs)

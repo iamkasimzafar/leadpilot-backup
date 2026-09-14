@@ -54,6 +54,14 @@ class ForbiddenError(AppError):
     message = "You do not have permission to perform this action."
 
 
+class EmailNotVerifiedError(AppError):
+    """Sign-in refused because the address has not been confirmed yet."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    code = "email_not_verified"
+    message = "Please verify your email address before signing in."
+
+
 class ValidationError(AppError):
     status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
     code = "validation_error"

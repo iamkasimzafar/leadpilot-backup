@@ -1,7 +1,8 @@
 """Declarative base and shared column mixins.
 
-Import every model module here so Alembic's autogenerate sees the full
-metadata. Models are imported for their side effect of registering on Base.
+This module must not import any model: models import Base from here, so an
+import in the other direction creates a cycle. The model registry that Alembic
+needs lives in app/db/registry.py instead.
 """
 
 import re
@@ -34,9 +35,3 @@ class TimestampMixin:
         onupdate=func.now(),
         nullable=False,
     )
-
-
-# --- Model registry (extend as you add models) --------------------------------
-# Imported for the side effect of registering on Base.metadata, so Alembic
-# autogenerate can see them. Placed last to avoid circular imports.
-# from app.models.user import User

@@ -18,6 +18,23 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(min_length=1)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str = Field(min_length=1)
+
+
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+
 class TokenPair(BaseModel):
     """Tokens are returned in the body so a browser client can read them."""
 

@@ -1,30 +1,44 @@
 """User endpoints.
 
-A worked example of the route -> service -> repository flow. Bodies raise
-NotImplementedError until a User model is added.
+A worked example of the route -> service -> repository flow.
 """
-
-from typing import Any
 
 from fastapi import APIRouter
 
 from app.api.deps import CurrentUser, DbSession, Pagination
+from app.core.exceptions import NotFoundError
+from app.repositories.user import UserRepository
+from app.schemas.common import Page
+from app.schemas.user import UserRead
 
 router = APIRouter()
 
 
-@router.get("", summary="List users")
+@router.get("", response_model=Page[UserRead], summary="List users")
 async def list_users(
     db: DbSession,
     pagination: Pagination,
     current_user: CurrentUser,
-) -> dict[str, Any]:
-    """Paginated user list. Returns a Page[UserRead] once wired up."""
-    raise NotImplementedError("Wire to UserService.list once User exists.")
+) -> Page[UserRead]:
+    """Paginated user list."""
+    repo = UserRepository(db)
+    users = await repo.list(offset=pagination.offset, limit=pagination.limit)
+    total = await repo.count()
+
+    return Page.create(
+        items=[UserRead.model_validate(u) for u in users],
+        total=total,
+        page=pagination.page,
+        per_page=pagination.per_page,
+    )
 
 
-@router.get("/{user_id}", summary="Get a user")
+@router.get("/{user_id}", response_model=UserRead, summary="Get a user")
 async def get_user(
     user_id: str, db: DbSession, current_user: CurrentUser
-) -> dict[str, Any]:
-    raise NotImplementedError("Wire to UserService.get once User exists.")
+) -> UserRead:
+    user = await UserRepository(db).get(user_id)
+    if user is None:
+        raise NotFoundError("No user with that id.")
+
+    return UserRead.model_validate(user)
