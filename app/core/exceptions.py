@@ -62,10 +62,42 @@ class EmailNotVerifiedError(AppError):
     message = "Please verify your email address before signing in."
 
 
+class SubscriptionRequiredError(AppError):
+    """Credit top-ups are gated behind an active base subscription."""
+
+    status_code = status.HTTP_403_FORBIDDEN
+    code = "subscription_required"
+    message = "An active subscription is required to buy credit top-ups."
+
+
+class InsufficientCreditsError(AppError):
+    """The wallet cannot cover the credits an action costs."""
+
+    status_code = status.HTTP_402_PAYMENT_REQUIRED
+    code = "insufficient_credits"
+    message = "Not enough credits for this action."
+
+
 class ValidationError(AppError):
     status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
     code = "validation_error"
     message = "The submitted data is invalid."
+
+
+class ServiceUnavailableError(AppError):
+    """A feature is switched off because its integration is not configured."""
+
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    code = "service_unavailable"
+    message = "This feature is not available right now."
+
+
+class UpstreamError(AppError):
+    """A third-party API we depend on failed or answered with something unusable."""
+
+    status_code = status.HTTP_502_BAD_GATEWAY
+    code = "upstream_error"
+    message = "An external service failed. Please try again."
 
 
 def _error_body(code: str, message: str, details: Any = None) -> dict[str, Any]:

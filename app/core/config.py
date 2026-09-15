@@ -75,6 +75,26 @@ class Settings(BaseSettings):
         address = self.EMAIL_FROM_ADDRESS or self.SMTP_USER
         return f"{self.EMAIL_FROM_NAME} <{address}>" if address else self.EMAIL_FROM_NAME
 
+    # --- DeepSeek (AI keyword expansion) -----------------------------------
+    # The API is OpenAI-compatible; the base URL only changes for a proxy.
+    # With no key set the expand endpoint answers 503 instead of crashing.
+    DEEPSEEK_API_KEY: str = ""
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+    DEEPSEEK_TIMEOUT: float = 45.0
+
+    # --- n8n (lead search workflow) ----------------------------------------
+    # Full URL of the webhook that kicks off the lead-search workflow. Use the
+    # /webhook-test/ path while building on the canvas (it accepts one call per
+    # "Execute workflow" click) and /webhook/ once the workflow is activated.
+    # Empty disables dispatch: the endpoint then answers 503.
+    N8N_WEBHOOK_URL: str = ""
+    # Optional shared secret, sent as a header when set. Configure the matching
+    # header auth on the n8n Webhook node so the endpoint is not wide open.
+    N8N_WEBHOOK_SECRET: str = ""
+    N8N_WEBHOOK_HEADER: str = "X-LeadPilot-Token"
+    N8N_TIMEOUT: float = 30.0
+
     # --- Database (MySQL) --------------------------------------------------
     MYSQL_HOST: str = "127.0.0.1"
     MYSQL_PORT: int = 3306

@@ -28,3 +28,7 @@ bcrypt==5.0.0
 
 # --- Logging -----------------------------------------------------------------
 structlog==26.1.0
+
+# --- Outbound HTTP -----------------------------------------------------------
+# Async client for the DeepSeek API (keyword expansion). Same pin as dev tooling.
+httpx==0.28.1

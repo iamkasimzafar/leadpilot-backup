@@ -11,6 +11,18 @@ Extend the imports below as you add models.
 """
 
 from app.db.base import Base
+from app.models.billing import CreditPurchase, CreditTransaction, Subscription, Wallet
+from app.models.notification import Notification
 from app.models.user import EmailVerificationToken, PasswordResetToken, User
 
-__all__ = ["Base", "EmailVerificationToken", "PasswordResetToken", "User"]
+__all__ = [
+    "Base",
+    "CreditPurchase",
+    "CreditTransaction",
+    "EmailVerificationToken",
+    "Notification",
+    "PasswordResetToken",
+    "Subscription",
+    "User",
+    "Wallet",
+]
