@@ -95,6 +95,11 @@ class Settings(BaseSettings):
     N8N_WEBHOOK_HEADER: str = "X-LeadPilot-Token"
     N8N_TIMEOUT: float = 30.0
 
+    # Public base URL of THIS api, used to build the progress callback URL sent
+    # to n8n. Must be reachable from the n8n host: "http://localhost:8000" only
+    # works if n8n runs on the same machine.
+    PUBLIC_API_URL: str = "http://localhost:8000"
+
     # --- Database (MySQL) --------------------------------------------------
     MYSQL_HOST: str = "127.0.0.1"
     MYSQL_PORT: int = 3306

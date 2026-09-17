@@ -1,8 +1,11 @@
-"""Lead Radar schemas: AI keyword expansion."""
+"""Lead Radar schemas: AI keyword expansion and search-run progress."""
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+from app.schemas.common import BaseSchema
 
 TermType = Literal["synonym", "scenario", "lang"]
 
@@ -35,6 +38,51 @@ class StartSearchResponse(BaseModel):
     original_keyword: str
     # Exactly what was forwarded, after de-duplication.
     expanded_keywords: list[str]
+    # The run to watch for progress. The client subscribes with this id.
+    run_id: str
+
+
+# --- Progress ----------------------------------------------------------------
+class SearchEventRead(BaseSchema):
+    stage: str
+    message: str | None = None
+    count: int | None = None
+    created_at: datetime
+
+
+class SearchRunRead(BaseSchema):
+    id: str
+    original_keyword: str
+    keyword_count: int
+    auto_add_to_leads: bool
+    status: str
+    stage: str
+    companies_found: int
+    contacts_found: int
+    error: str | None = None
+    created_at: datetime
+    finished_at: datetime | None = None
+    # Null until the workflow's results callback has been ingested. The UI
+    # shows "collecting results" between finished_at and this.
+    results_received_at: datetime | None = None
+    # Every checkpoint reported so far, oldest first.
+    events: list[SearchEventRead] = Field(default_factory=list)
+    # The checkpoint order the UI renders, so the stage list is server-driven.
+    stage_order: list[str] = Field(default_factory=list)
+
+
+class ProgressCallbackRequest(BaseModel):
+    """What n8n POSTs at each checkpoint.
+
+    Only `stage` is required. `status: "completed"` (or `stage: "completed"`)
+    closes the run; `error` fails it.
+    """
+
+    stage: str = Field(min_length=1, max_length=32)
+    message: str | None = Field(default=None, max_length=500)
+    count: int | None = Field(default=None, ge=0)
+    status: str | None = Field(default=None, max_length=16)
+    error: str | None = Field(default=None, max_length=500)
 
 
 class ExpandKeywordResponse(BaseModel):

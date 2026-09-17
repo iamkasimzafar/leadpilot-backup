@@ -12,15 +12,23 @@ Extend the imports below as you add models.
 
 from app.db.base import Base
 from app.models.billing import CreditPurchase, CreditTransaction, Subscription, Wallet
+from app.models.lead import Company, DecisionMaker
+from app.models.lead_search import LeadSearchEvent, LeadSearchRun
 from app.models.notification import Notification
+from app.models.notification_preference import NotificationPreference
 from app.models.user import EmailVerificationToken, PasswordResetToken, User
 
 __all__ = [
     "Base",
+    "Company",
     "CreditPurchase",
     "CreditTransaction",
+    "DecisionMaker",
     "EmailVerificationToken",
+    "LeadSearchEvent",
+    "LeadSearchRun",
     "Notification",
+    "NotificationPreference",
     "PasswordResetToken",
     "Subscription",
     "User",

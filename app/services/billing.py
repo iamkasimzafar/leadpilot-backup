@@ -163,8 +163,10 @@ class BillingService(BaseService):
 
         await self.commit()
 
-        # Announced only once the row is durable.
-        NotificationService.publish(user_id, notification.id)
+        # Announced only once the row is durable. None means the user has turned
+        # credit notifications off, so there is nothing to announce.
+        if notification is not None:
+            NotificationService.publish(user_id, notification.id)
 
         log.info("billing.subscribed", user_id=user_id, plan=plan.code)
         return subscription
@@ -210,7 +212,8 @@ class BillingService(BaseService):
 
         await self.commit()
 
-        NotificationService.publish(user_id, notification.id)
+        if notification is not None:
+            NotificationService.publish(user_id, notification.id)
 
         log.info("billing.topped_up", user_id=user_id, pack=pack.code)
         return purchase

@@ -12,6 +12,7 @@ from app.core.logging import get_logger
 from app.models.notification import Notification, NotificationKind
 from app.repositories.notification import NotificationRepository
 from app.services.base import BaseService
+from app.services.notification_preference import NotificationPreferenceService
 from app.services.notification_stream import notification_stream
 
 log = get_logger(__name__)
@@ -21,6 +22,7 @@ class NotificationService(BaseService):
     def __init__(self, db: AsyncSession) -> None:
         super().__init__(db)
         self.notifications = NotificationRepository(db)
+        self.preferences = NotificationPreferenceService(db)
 
     # --- Reads --------------------------------------------------------------
     async def list_for_user(
@@ -55,13 +57,27 @@ class NotificationService(BaseService):
         subtitle: str = "",
         link: str | None = None,
         commit: bool = True,
-    ) -> Notification:
+        force: bool = False,
+    ) -> Notification | None:
         """Raise a notification for one user.
+
+        Returns None when the user has switched this kind off in their settings
+        -- nothing is written and nothing is published. Callers that must always
+        reach the user (a security or billing failure, say) pass `force=True`.
 
         `commit=False` lets a caller group this with its own transaction (a
         purchase, say) so the notification and the thing it announces land
         together or not at all.
         """
+        if not force and not await self.preferences.allows(user_id, kind):
+            log.info(
+                "notification.suppressed_by_preference",
+                user_id=user_id,
+                kind=kind.value,
+            )
+
+            return None
+
         notification = await self.notifications.create(
             user_id=user_id,
             kind=kind.value,

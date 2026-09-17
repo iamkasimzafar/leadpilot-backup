@@ -20,6 +20,20 @@ from app.main import create_app
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 
+@pytest.fixture(autouse=True)
+def _no_real_email(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never let the suite send mail.
+
+    settings come from the developer's .env, where EMAIL_ENABLED is usually on
+    with real SMTP credentials. Every test that registers a user would then
+    send a verification and a welcome email through that account -- enough to
+    hit Gmail's daily limit. With it off, send_email logs instead.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "EMAIL_ENABLED", False)
+
+
 @pytest.fixture
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
     engine = create_async_engine(

@@ -44,6 +44,12 @@ class LeadSearchService:
         # Injectable so tests can hand in a MockTransport-backed client.
         self._client = client
 
+    @staticmethod
+    def merge_keywords(original: str, expanded: list[str]) -> list[str]:
+        """Public wrapper: the route needs the final list to open the run row
+        before dispatch."""
+        return _merge_keywords(" ".join(original.split()), expanded)
+
     async def start(
         self,
         original_keyword: str,
@@ -51,6 +57,8 @@ class LeadSearchService:
         *,
         auto_add_to_leads: bool = True,
         user_id: str | None = None,
+        run_id: str,
+        callback_token: str,
     ) -> StartSearchResponse:
         original = " ".join(original_keyword.split())
         keywords = _merge_keywords(original, expanded_keywords)
@@ -61,11 +69,20 @@ class LeadSearchService:
 
         # The exact shape the n8n workflow expects. Extra context goes after the
         # two required keys so the workflow can ignore it safely.
+        #
+        # `progress_url` is pre-built so the workflow's HTTP nodes can POST to
+        # it verbatim at each checkpoint -- no string assembly inside n8n.
+        base = settings.PUBLIC_API_URL.rstrip("/")
         payload = {
             "original_keyword": original,
             "expanded_keywords": keywords,
             "auto_add_to_leads": auto_add_to_leads,
             "requested_by": user_id,
+            "run_id": run_id,
+            "progress_url": (
+                f"{base}{settings.API_V1_PREFIX}/lead-radar/runs/{run_id}/progress"
+            ),
+            "progress_token": callback_token,
         }
 
         headers = {}
@@ -78,12 +95,14 @@ class LeadSearchService:
             "lead_search.dispatched",
             original_keyword=original,
             keyword_count=len(keywords),
+            run_id=run_id,
         )
 
         return StartSearchResponse(
             dispatched=True,
             original_keyword=original,
             expanded_keywords=keywords,
+            run_id=run_id,
         )
 
     async def _post(self, payload: dict[str, object], headers: dict[str, str]) -> None:
