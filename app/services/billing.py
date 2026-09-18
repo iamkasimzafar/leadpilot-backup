@@ -10,6 +10,7 @@ and the user picks a plan again.
 """
 
 import calendar
+from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -269,6 +270,76 @@ class BillingService(BaseService):
 
         log.info("billing.spent", user_id=user_id, amount=amount)
         return transaction
+
+    async def balance(self, user_id: str) -> int:
+        """The current balance, creating the wallet row on first use."""
+        wallet = await self.wallets.get_or_create(user_id)
+        await self.commit()
+
+        return wallet.balance
+
+    async def charge_capped(
+        self,
+        user_id: str,
+        lines: Sequence[tuple[str, int]],
+        *,
+        reference_type: str,
+        reference_id: str,
+    ) -> tuple[int, int]:
+        """Charge several (description, amount) lines, taking as much as the
+        balance allows and reporting the rest as a shortfall.
+
+        For bills that are only known after the work is done -- a lead search
+        is billed from what the workflow returned. Refusing the charge would
+        mean refusing results that were already paid for upstream, and the
+        wallet cannot go below zero (ck_wallet_balance_non_negative). So the
+        lines are charged in the order given until the balance is exhausted,
+        the last one partially if need be, and whatever could not be taken is
+        returned for the caller to record and surface to the user.
+
+        Each line becomes its own ledger entry, so the wallet history shows
+        the breakdown rather than one opaque total. Does not commit: the
+        caller groups this with the rows it is settling.
+
+        Returns (credits_charged, shortfall).
+        """
+        wallet = await self.wallets.get_for_update(user_id)
+        charged = 0
+        shortfall = 0
+
+        for description, amount in lines:
+            if amount <= 0:
+                continue
+
+            take = min(amount, wallet.balance)
+            if take > 0:
+                label = description
+                if take < amount:
+                    label = f"{description} (partial: {take:,} of {amount:,})"
+
+                # _post moves this same wallet instance, so the next line sees
+                # the reduced balance.
+                await self._post(
+                    user_id,
+                    -take,
+                    kind=TransactionKind.USAGE,
+                    description=label,
+                    reference_type=reference_type,
+                    reference_id=reference_id,
+                )
+                charged += take
+
+            shortfall += amount - take
+
+        log.info(
+            "billing.charged_capped",
+            user_id=user_id,
+            reference=f"{reference_type}:{reference_id}",
+            charged=charged,
+            shortfall=shortfall,
+        )
+
+        return charged, shortfall
 
     # --- Ledger -------------------------------------------------------------
     async def _post(

@@ -40,6 +40,26 @@ class CreditPack:
 # in the product is declared in one file.
 AI_KEYWORD_EXPANSION_CREDITS = 5
 
+# Charged per phone number checked, not per search: the provider bills each
+# lookup, so a run's final cost depends on how many contacts carry a number.
+# The UI shows an estimate before dispatch and the workflow reports the real
+# count back.
+WHATSAPP_VALIDATION_CREDITS = 8
+
+# --- Lead search -------------------------------------------------------------
+# A search is charged once, when the workflow's results arrive successfully:
+# a flat run fee, plus a per-company rate for every company returned, plus the
+# WhatsApp rate above for every number checked (if validation was requested).
+# A run that fails, or never reports back, costs nothing. The maths lives in
+# services/search_pricing.py.
+SEARCH_RUN_CREDITS = 15
+COMPANY_RESULT_CREDITS = 25
+
+# Starting assumptions for the pre-dispatch estimate, used until an account has
+# completed runs of its own to learn from.
+DEFAULT_COMPANIES_PER_KEYWORD = 10
+DEFAULT_CONTACTS_PER_COMPANY = 3
+
 # The exchange rate every product is priced at: $1 buys this many credits.
 # Applies to plans and packs alike, so value per dollar is identical whichever
 # a user buys. Derive `credits` from it rather than hand-writing a number, and
@@ -70,9 +90,14 @@ PACKS: dict[str, CreditPack] = {
 
 __all__ = [
     "AI_KEYWORD_EXPANSION_CREDITS",
+    "COMPANY_RESULT_CREDITS",
     "CREDITS_PER_DOLLAR",
+    "DEFAULT_COMPANIES_PER_KEYWORD",
+    "DEFAULT_CONTACTS_PER_COMPANY",
     "PACKS",
     "PLANS",
+    "SEARCH_RUN_CREDITS",
+    "WHATSAPP_VALIDATION_CREDITS",
     "BillingInterval",
     "CreditPack",
     "Plan",

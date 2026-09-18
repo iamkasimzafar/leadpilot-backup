@@ -12,3 +12,5 @@ httpx==0.28.1
 # --- Quality -----------------------------------------------------------------
 ruff==0.16.7
 mypy==2.3.1
+# openpyxl ships no type hints; without these mypy sees the export as Any.
+types-openpyxl==3.1.5.20260827

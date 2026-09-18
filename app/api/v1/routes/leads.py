@@ -1,5 +1,7 @@
 """My Leads endpoints."""
 
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Query, Response, status
 
 from app.api.deps import CurrentUser, DbSession, Pagination
@@ -16,6 +18,12 @@ from app.schemas.lead import (
     LeadPage,
     LeadStatusValue,
     LeadUpdate,
+)
+from app.services.lead_export import (
+    CONTENT_TYPES,
+    ExportFormat,
+    LeadExportService,
+    filename_for,
 )
 from app.services.leads import LeadService
 
@@ -51,6 +59,42 @@ async def list_leads(
 @router.get("/counts", response_model=LeadCounts, summary="Tab counts")
 async def lead_counts(db: DbSession, current_user: CurrentUser) -> LeadCounts:
     return await LeadService(db).counts(current_user.id)
+
+
+@router.get(
+    "/export",
+    summary="Download my leads as CSV or Excel",
+    response_class=Response,
+    responses={200: {"content": {"text/csv": {}, CONTENT_TYPES["xlsx"]: {}}}},
+)
+async def export_leads(
+    db: DbSession,
+    current_user: CurrentUser,
+    fmt: ExportFormat = Query("csv", alias="format", description="csv or xlsx."),
+    status_filter: LeadStatusValue | None = Query(
+        None, alias="status", description="Only leads in this status."
+    ),
+    ids: list[str] = Query(
+        default_factory=list,
+        description="Only these leads (repeat the parameter). Empty means all.",
+        max_length=500,
+    ),
+) -> Response:
+    """One row per contact, every matching lead, no page limit.
+
+    Declared above `/{lead_id}` on purpose: a literal path segment has to be
+    registered before the parameterised one, or "export" is read as an id.
+    """
+    body = await LeadExportService(db).export(
+        current_user.id, fmt=fmt, status=status_filter, ids=ids or None
+    )
+    filename = filename_for(fmt, status_filter, datetime.now(UTC))
+
+    return Response(
+        content=body,
+        media_type=CONTENT_TYPES[fmt],
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/add", response_model=AddToLeadsResponse, summary="Add results to my leads")

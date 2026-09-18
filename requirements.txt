@@ -32,3 +32,7 @@ structlog==26.1.0
 # --- Outbound HTTP -----------------------------------------------------------
 # Async client for the DeepSeek API (keyword expansion). Same pin as dev tooling.
 httpx==0.28.1
+
+# --- Exports -----------------------------------------------------------------
+# Writes the .xlsx export of My Leads. CSV needs nothing beyond the stdlib.
+openpyxl==3.1.5

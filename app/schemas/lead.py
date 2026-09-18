@@ -23,11 +23,56 @@ def _blank_to_none(value: Any) -> Any:
     return value
 
 
+def _coerce_to_text(value: Any) -> Any:
+    """Accept the non-string values the workflow's JavaScript can produce.
+
+    n8n builds these payloads in JS, where a field that looks textual may arrive
+    as a boolean (`whatsapp_status: true`) or a number (a phone number without
+    quotes). Rejecting those would fail the whole results POST -- every company
+    in the batch -- over one contact, so they are converted instead:
+
+      True / False  ->  "Active" / "Not Active", matching what the workflow
+                        sends when it reports the status as a label.
+      int / float   ->  the digits as written, so a phone number survives.
+
+    Anything else is handed on unchanged for the normal validators to judge.
+    """
+    if isinstance(value, bool):
+        return "Active" if value else "Not Active"
+
+    if isinstance(value, int | float):
+        # int() first so 4930123456789.0 does not become "4930123456789.0".
+        return str(int(value)) if float(value).is_integer() else str(value)
+
+    return value
+
+
+# Column widths, so a value too long for the database is trimmed here rather
+# than failing the whole batch. The untrimmed original is kept in extra_json.
+_CONTACT_LIMITS = {
+    "full_name": 255,
+    "job_title": 255,
+    "verified_email": 320,
+    "email_status": 32,
+    "linkedin_url": 500,
+    "phone_number": 64,
+    "whatsapp_status": 32,
+}
+
+
 class DecisionMakerIn(BaseModel):
     """One decision maker in the workflow's payload.
 
-    Unknown keys are kept (model_config below) and preserved in extra_json, so
-    adding a field in n8n never loses data or breaks this endpoint.
+    Mirrors what the n8n workflow pushes per contact: full_name, job_title,
+    verified_email, email_status, linkedin_url, phone_number, whatsapp_status.
+
+    Nothing from the payload is discarded. Unknown keys are kept (extra="allow")
+    and stored in extra_json; over-long values are trimmed to fit their column
+    with the full original preserved in extra_json under "<field>_full"; and
+    values the workflow's JavaScript emits as booleans or numbers are coerced
+    rather than rejected. This matters because the results POST is validated as
+    one document: without it, a single odd contact would lose every company in
+    the batch.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -39,6 +84,31 @@ class DecisionMakerIn(BaseModel):
     linkedin_url: str | None = Field(default=None, max_length=500)
     phone_number: str | None = Field(default=None, max_length=64)
     whatsapp_status: str | None = Field(default=None, max_length=32)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fit_to_columns(cls, data: Any) -> Any:
+        """Coerce JS types and trim over-long values, keeping the originals."""
+        if not isinstance(data, dict):
+            return data
+
+        fitted = dict(data)
+        for field, limit in _CONTACT_LIMITS.items():
+            value = _coerce_to_text(fitted.get(field))
+            if not isinstance(value, str):
+                fitted[field] = value
+                continue
+
+            cleaned = " ".join(value.split())
+            if len(cleaned) > limit:
+                # Truncating silently would lose the tail of a long LinkedIn URL
+                # or job title, so the whole value is kept alongside it.
+                fitted[f"{field}_full"] = cleaned
+                cleaned = cleaned[:limit]
+
+            fitted[field] = cleaned
+
+        return fitted
 
     @field_validator(
         "job_title",
@@ -59,8 +129,23 @@ class DecisionMakerIn(BaseModel):
         return " ".join(str(value).split()) if value is not None else value
 
 
+_COMPANY_LIMITS = {
+    "company_name": 255,
+    "website": 500,
+    "location": 255,
+    "industry": 255,
+    "company_size": 64,
+    "hq_phone": 64,
+}
+
+
 class CompanyIn(BaseModel):
-    """One company in the workflow's payload."""
+    """One company in the workflow's payload.
+
+    Same contract as DecisionMakerIn: unknown keys are preserved, over-long
+    values are trimmed with the original kept, and JS booleans / numbers are
+    coerced rather than failing the batch.
+    """
 
     model_config = ConfigDict(extra="allow")
 
@@ -71,6 +156,28 @@ class CompanyIn(BaseModel):
     company_size: str | None = Field(default=None, max_length=64)
     hq_phone: str | None = Field(default=None, max_length=64)
     decision_makers: list[DecisionMakerIn] = Field(default_factory=list, max_length=500)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fit_to_columns(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        fitted = dict(data)
+        for field, limit in _COMPANY_LIMITS.items():
+            value = _coerce_to_text(fitted.get(field))
+            if not isinstance(value, str):
+                fitted[field] = value
+                continue
+
+            cleaned = " ".join(value.split())
+            if len(cleaned) > limit:
+                fitted[f"{field}_full"] = cleaned
+                cleaned = cleaned[:limit]
+
+            fitted[field] = cleaned
+
+        return fitted
 
     @field_validator(
         "website", "location", "industry", "company_size", "hq_phone", mode="before"

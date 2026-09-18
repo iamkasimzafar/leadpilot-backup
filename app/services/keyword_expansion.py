@@ -19,6 +19,7 @@ from app.core.config import settings
 from app.core.exceptions import ServiceUnavailableError, UpstreamError
 from app.core.logging import get_logger
 from app.schemas.lead_radar import ExpandedTerm, ExpandKeywordResponse
+from app.services.company_types import name_for, prompt_hint_for
 
 log = get_logger(__name__)
 
@@ -65,6 +66,14 @@ Rules: every term must be short (2-5 words), specific, and different from the ot
 Never repeat the original keyword. No explanations inside terms. Title-case English \
 terms like a product name ("Digital signage"), keep other languages natural.
 
+TARGET BUYER. The user may tell you which kind of company they want to find, as a \
+"Target company type" line after the keyword. When they do, bias every synonym and \
+especially every scenario towards the words THAT kind of company uses when searching \
+or describing itself, so the terms become Google queries that surface those companies \
+rather than the general market. Keep the terms about the product and its buyers; do \
+not simply append the company type to each term. When no target company type is \
+given, cover the market broadly as usual.
+
 Reply with a single JSON object and nothing else, in exactly this shape:
 {
   "valid": true,
@@ -109,7 +118,9 @@ class KeywordExpansionService:
         # Injectable so tests can hand in a MockTransport-backed client.
         self._client = client
 
-    async def expand(self, keyword: str) -> ExpandKeywordResponse:
+    async def expand(
+        self, keyword: str, company_type: str | None = None
+    ) -> ExpandKeywordResponse:
         keyword = _clean(keyword)
 
         # Cheap local guard: nothing to send if there is not a single letter or
@@ -127,17 +138,38 @@ class KeywordExpansionService:
                 "AI keyword expansion is not configured on this server."
             )
 
-        reply = await self._ask_model(keyword)
+        reply = await self._ask_model(keyword, company_type)
         return self._to_response(keyword, reply)
 
     # --- DeepSeek call --------------------------------------------------------
 
-    async def _ask_model(self, keyword: str) -> _ModelReply:
+    @staticmethod
+    def _user_message(keyword: str, company_type: str | None) -> str:
+        """The user turn: the keyword, plus who we are trying to reach.
+
+        The company type is expanded into its description rather than sent as a
+        bare code, so the model is told what that kind of buyer actually is.
+        """
+        lines = [f"Keyword: {keyword}"]
+
+        hint = prompt_hint_for(company_type) if company_type else None
+        if hint:
+            name = name_for(company_type or "")
+            lines.append(f"Target company type: {name} — {hint}")
+
+        return "\n".join(lines)
+
+    async def _ask_model(
+        self, keyword: str, company_type: str | None = None
+    ) -> _ModelReply:
         body = {
             "model": settings.DEEPSEEK_MODEL,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"Keyword: {keyword}"},
+                {
+                    "role": "user",
+                    "content": self._user_message(keyword, company_type),
+                },
             ],
             # DeepSeek's JSON mode: guarantees parseable output as long as the
             # prompt mentions JSON (it does).

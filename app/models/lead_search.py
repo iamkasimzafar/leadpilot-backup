@@ -101,6 +101,45 @@ class LeadSearchRun(Base, TimestampMixin):
         Boolean, default=True, server_default=func.true(), nullable=False
     )
 
+    # SerpApi `gl` code the search was scoped to; NULL for a worldwide search.
+    # Recorded so the run history shows what a search actually covered.
+    country: Mapped[str | None] = mapped_column(String(2), nullable=True)
+
+    # Which kind of company the search targeted (see services/company_types.py);
+    # NULL when it targeted any type.
+    company_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    # Snov.io extraction filters (see services/search_targeting.py). NULL means
+    # the filter was not applied. Recorded because they decide which contacts
+    # were extracted, and therefore what the run was charged for.
+    contact_role: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    company_size: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+    # Whether the run asked the workflow to check each number on WhatsApp.
+    # Recorded because it is billed per check, so it explains part of the cost.
+    validate_whatsapp: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=func.false(), nullable=False
+    )
+
+    # Settlement. Written once, by whichever results ingest claims it, and only
+    # for a successful run -- a null credits_charged_at means the run has not
+    # been billed: still running, failed, or its results never came.
+    # `credits_shortfall` is the part of the bill the balance could not cover
+    # (the wallet cannot go below zero), kept so the run can show what it cost
+    # and what is still owed. `whatsapp_checks` is the count that was billed.
+    credits_charged: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    credits_shortfall: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    whatsapp_checks: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    credits_charged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     status: Mapped[str] = mapped_column(
         String(16), default=RunStatus.RUNNING.value, nullable=False
     )

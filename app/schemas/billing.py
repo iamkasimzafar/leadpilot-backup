@@ -54,6 +54,10 @@ class CreditTransactionRead(BaseSchema):
     amount: int = Field(description="Signed: positive adds credits, negative spends.")
     balance_after: int
     description: str
+    # What the entry settled, so the history can link back to it -- e.g.
+    # ("lead_search_run", <run id>) for the lines of a search bill.
+    reference_type: str | None = None
+    reference_id: str | None = None
     created_at: datetime
 
 

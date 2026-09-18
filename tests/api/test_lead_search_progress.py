@@ -43,8 +43,19 @@ def _mock_n8n(monkeypatch: pytest.MonkeyPatch, *, status: int = 200) -> dict[str
 
 
 async def _headers(client: AsyncClient, db_session: Any) -> dict[str, str]:
+    """Sign in and fund the wallet: the start gate refuses a search the balance
+    could not cover. Pro yearly grants 4,990, enough for any run here."""
     tokens = await signed_in_tokens(client, db_session)
-    return {"Authorization": f"Bearer {tokens['access_token']}"}
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+    response = await client.post(
+        f"{PREFIX}/billing/subscriptions",
+        json={"plan_code": "pro_yearly"},
+        headers=headers,
+    )
+    assert response.status_code == 201
+
+    return headers
 
 
 async def _start(client: AsyncClient, headers: dict[str, str]) -> dict:

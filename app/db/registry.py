@@ -17,6 +17,7 @@ from app.models.lead_search import LeadSearchEvent, LeadSearchRun
 from app.models.notification import Notification
 from app.models.notification_preference import NotificationPreference
 from app.models.user import EmailVerificationToken, PasswordResetToken, User
+from app.models.workflow_error import WorkflowError
 
 __all__ = [
     "Base",
@@ -33,4 +34,5 @@ __all__ = [
     "Subscription",
     "User",
     "Wallet",
+    "WorkflowError",
 ]

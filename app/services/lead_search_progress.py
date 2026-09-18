@@ -65,6 +65,11 @@ class LeadSearchProgressService(BaseService):
         keywords: list[str],
         *,
         auto_add_to_leads: bool = True,
+        country: str | None = None,
+        company_type: str | None = None,
+        contact_role: str | None = None,
+        company_size: str | None = None,
+        validate_whatsapp: bool = False,
     ) -> LeadSearchRun:
         """Open a run, ready to be dispatched to n8n. Commits immediately so the
         row exists before the workflow can call back."""
@@ -74,6 +79,11 @@ class LeadSearchProgressService(BaseService):
             keywords_json=json.dumps(keywords),
             keyword_count=len(keywords),
             auto_add_to_leads=auto_add_to_leads,
+            country=country,
+            company_type=company_type,
+            contact_role=contact_role,
+            company_size=company_size,
+            validate_whatsapp=validate_whatsapp,
             status=RunStatus.RUNNING.value,
             stage=SearchStage.QUEUED.value,
         )
@@ -99,6 +109,17 @@ class LeadSearchProgressService(BaseService):
             raise NotFoundError("No search run with that id.")
 
         return run
+
+    async def list_for_user(
+        self, user_id: str, *, offset: int, limit: int, active_only: bool = False
+    ) -> tuple[list[LeadSearchRun], int]:
+        """A page of the user's searches, newest first, plus the total."""
+        runs = await self.runs.list_for_user(
+            user_id, offset=offset, limit=limit, active_only=active_only
+        )
+        total = await self.runs.count_for_user(user_id, active_only=active_only)
+
+        return runs, total
 
     async def events_for(self, run_id: str) -> list[LeadSearchEvent]:
         return await self.events.list_for_run(run_id)

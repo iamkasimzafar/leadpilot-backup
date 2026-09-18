@@ -31,11 +31,27 @@ def _capturing_client(
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
 
+# Every dispatch belongs to a run, which supplies the id and the secret the
+# workflow calls back with. These tests are about the payload, not the run, so
+# both are stand-ins.
+RUN_ID = "11111111-2222-3333-4444-555555555555"
+CALLBACK_TOKEN = "run-token-for-tests"
+
+
+async def _start(
+    service: LeadSearchService, keyword: str, expanded: list[str]
+) -> Any:
+    return await service.start(
+        keyword, expanded, run_id=RUN_ID, callback_token=CALLBACK_TOKEN
+    )
+
+
 async def test_payload_matches_the_workflow_contract() -> None:
     sink: dict[str, Any] = {}
     service = LeadSearchService(_capturing_client(sink))
 
-    result = await service.start(
+    result = await _start(
+        service,
         "US furniture importer",
         ["furniture distributor USA", "wholesale furniture importer US"],
     )
@@ -55,7 +71,8 @@ async def test_original_keyword_leads_and_duplicates_are_dropped() -> None:
     sink: dict[str, Any] = {}
     service = LeadSearchService(_capturing_client(sink))
 
-    await service.start(
+    await _start(
+        service,
         "  LED   screen ",
         ["Digital signage", "led screen", "  ", "Digital Signage", "LED video wall"],
     )
@@ -75,7 +92,7 @@ async def test_secret_is_sent_as_header_when_configured(
     sink: dict[str, Any] = {}
     service = LeadSearchService(_capturing_client(sink))
 
-    await service.start("LED screen", [])
+    await _start(service, "LED screen", [])
 
     assert sink["headers"]["x-leadpilot-token"] == "s3cret"
 
@@ -84,7 +101,7 @@ async def test_no_secret_means_no_header() -> None:
     sink: dict[str, Any] = {}
     service = LeadSearchService(_capturing_client(sink))
 
-    await service.start("LED screen", [])
+    await _start(service, "LED screen", [])
 
     assert "x-leadpilot-token" not in sink["headers"]
 
@@ -93,7 +110,7 @@ async def test_unconfigured_webhook_gives_503(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(settings, "N8N_WEBHOOK_URL", "")
 
     with pytest.raises(ServiceUnavailableError):
-        await LeadSearchService().start("LED screen", [])
+        await _start(LeadSearchService(), "LED screen", [])
 
 
 async def test_unregistered_test_webhook_explains_how_to_arm_it() -> None:
@@ -102,7 +119,7 @@ async def test_unregistered_test_webhook_explains_how_to_arm_it() -> None:
     service = LeadSearchService(_capturing_client(sink, status=404, body=body))
 
     with pytest.raises(UpstreamError) as exc:
-        await service.start("LED screen", [])
+        await _start(service, "LED screen", [])
 
     assert "Execute workflow" in exc.value.message
 
@@ -112,4 +129,4 @@ async def test_workflow_error_becomes_502() -> None:
     service = LeadSearchService(_capturing_client(sink, status=500, body={"e": 1}))
 
     with pytest.raises(UpstreamError):
-        await service.start("LED screen", [])
+        await _start(service, "LED screen", [])

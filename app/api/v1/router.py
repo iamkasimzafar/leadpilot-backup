@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.api.v1.routes import (
     auth,
     billing,
+    dashboard,
     health,
     lead_radar,
     leads,
@@ -21,6 +22,7 @@ api_router.include_router(users.router, prefix="/users", tags=["users"])
 api_router.include_router(lead_radar.router, prefix="/lead-radar", tags=["lead-radar"])
 api_router.include_router(billing.router, prefix="/billing", tags=["billing"])
 api_router.include_router(leads.router, prefix="/leads", tags=["leads"])
+api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
 api_router.include_router(
     notifications.router, prefix="/notifications", tags=["notifications"]
 )

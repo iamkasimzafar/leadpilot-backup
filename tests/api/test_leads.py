@@ -82,6 +82,15 @@ async def _run_search(
         tokens = await signed_in_tokens(client, db_session)
         headers = {"Authorization": f"Bearer {tokens['access_token']}"}
 
+        # The start gate refuses a search the balance could not cover. Pro
+        # yearly grants 4,990 credits, enough for any run here.
+        funded = await client.post(
+            f"{PREFIX}/billing/subscriptions",
+            json={"plan_code": "pro_yearly"},
+            headers=headers,
+        )
+        assert funded.status_code == 201
+
     started = await client.post(
         SEARCH,
         json={

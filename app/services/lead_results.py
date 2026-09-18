@@ -7,6 +7,7 @@ workflow's HTTP node may retry.
 """
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -22,9 +23,11 @@ from app.repositories.lead import CompanyRepository, DecisionMakerRepository
 from app.repositories.lead_search import LeadSearchEventRepository
 from app.schemas.lead import CompanyIn, SearchResultsRequest, SearchResultsResponse
 from app.services.base import BaseService
+from app.services.billing import BillingService
 from app.services.leads import LeadService
 from app.services.notification import NotificationService
 from app.services.progress_stream import progress_stream
+from app.services.search_pricing import cost_lines, total_credits
 
 log = get_logger(__name__)
 
@@ -75,6 +78,18 @@ def _extras(model: Any, known: set[str]) -> str:
     return json.dumps(extra, ensure_ascii=False, default=str) if extra else "{}"
 
 
+@dataclass(frozen=True)
+class Settlement:
+    """What a completed run was billed."""
+
+    charged: int
+    shortfall: int
+    whatsapp_checks: int
+
+    # The full bill: charged + shortfall.
+    billed: int
+
+
 class LeadResultsService(BaseService):
     def __init__(self, db: AsyncSession) -> None:
         super().__init__(db)
@@ -82,6 +97,7 @@ class LeadResultsService(BaseService):
         self.contacts = DecisionMakerRepository(db)
         self.events = LeadSearchEventRepository(db)
         self.notifications = NotificationService(db)
+        self.billing = BillingService(db)
 
     async def ingest(
         self, run: LeadSearchRun, payload: SearchResultsRequest
@@ -178,29 +194,58 @@ class LeadResultsService(BaseService):
 
         await self.db.refresh(run)
 
+        # --- Settlement ---------------------------------------------------
+        # Charged once, only for a run that completed successfully, and only
+        # by whichever ingest claims it: n8n can post the same results several
+        # times at once, and the conditional UPDATE succeeds for exactly one
+        # of them. A failed run -- or one the error trigger already closed --
+        # is never billed: nothing is taken until the results are good.
+        settled: Settlement | None = None
+        if not failed and run.status == RunStatus.COMPLETED.value:
+            claimed = await self.db.execute(
+                update(LeadSearchRun)
+                .where(
+                    LeadSearchRun.id == run.id,
+                    LeadSearchRun.credits_charged_at.is_(None),
+                )
+                .values(credits_charged_at=now)
+            )
+            if claimed.rowcount == 1:  # type: ignore[attr-defined]
+                settled = await self._settle(run, companies=total)
+                await self.db.refresh(run)
+
         notification = None
+        shortfall_notice = None
         if first_results:
             # Recorded as an event too, so the run's history shows results landing.
+            summary = (
+                run.error
+                if failed
+                else f"{total:,} companies and {contact_total:,} contacts saved"
+            )
+            if settled is not None:
+                summary = f"{summary} · {settled.charged:,} credits charged"
+
             await self.events.create(
                 run_id=run.id,
                 stage=SearchStage.COMPLETED.value,
-                message=(
-                    run.error
-                    if failed
-                    else f"{total:,} companies and {contact_total:,} contacts saved"
-                ),
+                message=summary,
                 count=total,
             )
 
             notification = await self._finish_notification(run, failed)
+
+        if settled is not None and settled.shortfall > 0:
+            shortfall_notice = await self._shortfall_notification(run, settled)
 
         await self.commit()
 
         progress_stream.publish(run.user_id, run.id)
 
         # None when the user has this notification kind switched off.
-        if notification is not None:
-            NotificationService.publish(run.user_id, notification.id)
+        for notice in (notification, shortfall_notice):
+            if notice is not None:
+                NotificationService.publish(run.user_id, notice.id)
 
         log.info(
             "lead_results.ingested",
@@ -208,6 +253,7 @@ class LeadResultsService(BaseService):
             saved=saved,
             updated=updated,
             contacts=contacts_saved,
+            charged=settled.charged if settled else None,
         )
 
         return SearchResultsResponse(
@@ -311,6 +357,84 @@ class LeadResultsService(BaseService):
         await self.db.refresh(company, attribute_names=["decision_makers"])
 
         return created
+
+    async def _settle(self, run: LeadSearchRun, *, companies: int) -> Settlement:
+        """Bill the run from what it actually returned.
+
+        Run fee, then companies, then WhatsApp checks, charged in that order
+        until the balance runs out; whatever is left over is recorded on the
+        run as a shortfall rather than refused, because the workflow has
+        already done the work. Does not commit: it joins the ingest
+        transaction, so the results and their charge land together or not at
+        all.
+        """
+        # Only numbers the workflow actually checked, and only if the user
+        # asked for validation. Charged whether the number was active or not.
+        checks = (
+            await self.contacts.count_whatsapp_checked_for_run(run.id)
+            if run.validate_whatsapp
+            else 0
+        )
+
+        lines = cost_lines(
+            companies=companies,
+            whatsapp_checks=checks,
+            validate_whatsapp=run.validate_whatsapp,
+        )
+
+        charged, shortfall = await self.billing.charge_capped(
+            run.user_id,
+            [(line.description, line.credits) for line in lines],
+            reference_type="lead_search_run",
+            reference_id=run.id,
+        )
+
+        await self.db.execute(
+            update(LeadSearchRun)
+            .where(LeadSearchRun.id == run.id)
+            .values(
+                credits_charged=charged,
+                credits_shortfall=shortfall,
+                whatsapp_checks=checks,
+            )
+        )
+
+        log.info(
+            "lead_search.settled",
+            run_id=run.id,
+            user_id=run.user_id,
+            companies=companies,
+            whatsapp_checks=checks,
+            charged=charged,
+            shortfall=shortfall,
+        )
+
+        return Settlement(
+            charged=charged,
+            shortfall=shortfall,
+            whatsapp_checks=checks,
+            billed=total_credits(lines),
+        )
+
+    async def _shortfall_notification(self, run: LeadSearchRun, settled: Settlement):  # type: ignore[no-untyped-def]
+        """Tell the user part of the bill could not be taken.
+
+        Forced past the credits notification preference: this is money they
+        owe, not news they can opt out of.
+        """
+        return await self.notifications.create(
+            run.user_id,
+            kind=NotificationKind.CREDITS,
+            title=f"{settled.shortfall:,} credits could not be charged",
+            subtitle=(
+                f'Your search for "{run.original_keyword}" cost {settled.billed:,} '
+                f"credits but your balance only covered {settled.charged:,}. "
+                f"Top up to keep searching."
+            ),
+            link="/wallet",
+            commit=False,
+            force=True,
+        )
 
     async def _finish_notification(self, run: LeadSearchRun, failed: bool):  # type: ignore[no-untyped-def]
         if failed:

@@ -11,6 +11,15 @@ from app.core.config import settings
 from app.core.exceptions import ServiceUnavailableError, UpstreamError
 from app.core.logging import get_logger
 from app.schemas.lead_radar import StartSearchResponse
+from app.services.billing_catalog import WHATSAPP_VALIDATION_CREDITS
+from app.services.company_types import name_for as company_type_name_for
+from app.services.countries import name_for
+from app.services.search_targeting import (
+    role_name_for,
+    role_titles_for,
+    size_bounds_for,
+    size_name_for,
+)
 
 log = get_logger(__name__)
 
@@ -59,9 +68,26 @@ class LeadSearchService:
         user_id: str | None = None,
         run_id: str,
         callback_token: str,
+        country: str | None = None,
+        company_type: str | None = None,
+        contact_role: str | None = None,
+        company_size: str | None = None,
+        validate_whatsapp: bool = False,
     ) -> StartSearchResponse:
         original = " ".join(original_keyword.split())
         keywords = _merge_keywords(original, expanded_keywords)
+
+        # Resolved here so the workflow gets a usable label without a lookup of
+        # its own. None stays None: the workflow reads that as "worldwide".
+        country_name = name_for(country) if country else None
+        company_type_name = company_type_name_for(company_type) if company_type else None
+
+        # The Snov.io extraction filters, resolved to what that API needs: job
+        # titles to match, and an employee-count range.
+        role_name = role_name_for(contact_role) if contact_role else None
+        role_titles = role_titles_for(contact_role) if contact_role else None
+        size_name = size_name_for(company_size) if company_size else None
+        size_bounds = size_bounds_for(company_size) if company_size else None
 
         if not settings.N8N_WEBHOOK_URL:
             log.warning("lead_search.disabled", reason="N8N_WEBHOOK_URL not set")
@@ -73,9 +99,39 @@ class LeadSearchService:
         # `progress_url` is pre-built so the workflow's HTTP nodes can POST to
         # it verbatim at each checkpoint -- no string assembly inside n8n.
         base = settings.PUBLIC_API_URL.rstrip("/")
-        payload = {
+
+        # Annotated because `country` makes the values heterogeneous, and a
+        # dict[str, X] will not pass as dict[str, object] (invariance).
+        payload: dict[str, object] = {
             "original_keyword": original,
             "expanded_keywords": keywords,
+            # SerpApi `gl` code, or null for a worldwide search. `country_name`
+            # is the display label for the same code, so the workflow can use
+            # it in prompts and emails without its own lookup table.
+            "country": country,
+            "country_name": country_name,
+            # Which kind of company to look for, or null for any. The code is
+            # the stable value; the name is the display label for prompts.
+            "company_type": company_type,
+            "company_type_name": company_type_name,
+            # Snov.io extraction filters. `contact_role_titles` is the job-title
+            # list to match and `company_size_min/max` the employee range, both
+            # pre-resolved so the workflow can pass them straight to Snov.io.
+            # Null everywhere means "extract anyone", as before these existed.
+            "contact_role": contact_role,
+            "contact_role_name": role_name,
+            "contact_role_titles": role_titles,
+            "company_size": company_size,
+            "company_size_name": size_name,
+            "company_size_min": size_bounds[0] if size_bounds else None,
+            "company_size_max": size_bounds[1] if size_bounds else None,
+            # WhatsApp validation. Only run the check when this is true: it is
+            # billed per number, so the workflow must not do it speculatively.
+            # The price travels with it so the workflow can report the charge.
+            "validate_whatsapp": validate_whatsapp,
+            "whatsapp_credits_per_check": (
+                WHATSAPP_VALIDATION_CREDITS if validate_whatsapp else None
+            ),
             "auto_add_to_leads": auto_add_to_leads,
             "requested_by": user_id,
             "run_id": run_id,
@@ -96,6 +152,11 @@ class LeadSearchService:
             original_keyword=original,
             keyword_count=len(keywords),
             run_id=run_id,
+            country=country or "worldwide",
+            company_type=company_type or "any",
+            contact_role=contact_role or "any",
+            company_size=company_size or "any",
+            validate_whatsapp=validate_whatsapp,
         )
 
         return StartSearchResponse(
@@ -103,6 +164,18 @@ class LeadSearchService:
             original_keyword=original,
             expanded_keywords=keywords,
             run_id=run_id,
+            country=country,
+            country_name=country_name,
+            company_type=company_type,
+            company_type_name=company_type_name,
+            contact_role=contact_role,
+            contact_role_name=role_name,
+            company_size=company_size,
+            company_size_name=size_name,
+            validate_whatsapp=validate_whatsapp,
+            whatsapp_credits_per_check=(
+                WHATSAPP_VALIDATION_CREDITS if validate_whatsapp else None
+            ),
         )
 
     async def _post(self, payload: dict[str, object], headers: dict[str, str]) -> None:

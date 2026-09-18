@@ -1,5 +1,7 @@
 """Data access for companies and their decision makers."""
 
+from datetime import datetime
+
 from sqlalchemy import Select, func, select
 
 from app.models.lead import Company, DecisionMaker, LeadStatus
@@ -49,9 +51,38 @@ class CompanyRepository(BaseRepository[Company]):
 
         return list(result.scalars().all())
 
+    async def list_leads_for_export(
+        self, user_id: str, *, status: str | None = None, ids: list[str] | None = None
+    ) -> list[Company]:
+        """Every matching lead, newest-added first, with no page limit.
+
+        `ids` narrows to a hand-picked set. It is still scoped to the user's
+        own leads, so an id from another account simply does not appear
+        rather than leaking.
+        """
+        stmt = self._leads_query(user_id, status)
+        if ids:
+            stmt = stmt.where(Company.id.in_(ids))
+
+        stmt = stmt.order_by(Company.added_to_leads_at.desc())
+        result = await self.db.execute(stmt)
+
+        return list(result.scalars().unique().all())
+
     async def count_leads(self, user_id: str, *, status: str | None = None) -> int:
         stmt = select(func.count()).select_from(
             self._leads_query(user_id, status).subquery()
+        )
+        result = await self.db.execute(stmt)
+
+        return result.scalar_one()
+
+    async def count_added_since(self, user_id: str, since: datetime) -> int:
+        """Leads added to My Leads at or after `since` (the dashboard's "today")."""
+        stmt = (
+            select(func.count())
+            .select_from(Company)
+            .where(Company.user_id == user_id, Company.added_to_leads_at >= since)
         )
         result = await self.db.execute(stmt)
 
@@ -135,12 +166,41 @@ class DecisionMakerRepository(BaseRepository[DecisionMaker]):
     ) -> DecisionMaker | None:
         return await self.find_one_by(id=contact_id, company_id=company_id)
 
+    async def count_found_since(self, user_id: str, since: datetime) -> int:
+        """Decision makers discovered for this user at or after `since`."""
+        stmt = (
+            select(func.count())
+            .select_from(DecisionMaker)
+            .join(Company, Company.id == DecisionMaker.company_id)
+            .where(Company.user_id == user_id, DecisionMaker.created_at >= since)
+        )
+        result = await self.db.execute(stmt)
+
+        return result.scalar_one()
+
     async def count_for_run(self, run_id: str) -> int:
         stmt = (
             select(func.count())
             .select_from(DecisionMaker)
             .join(Company, Company.id == DecisionMaker.company_id)
             .where(Company.run_id == run_id)
+        )
+        result = await self.db.execute(stmt)
+
+        return result.scalar_one()
+
+    async def count_whatsapp_checked_for_run(self, run_id: str) -> int:
+        """Contacts the workflow actually ran a WhatsApp check on.
+
+        A null status means no check happened -- no number to check, or
+        validation was off -- so those rows are not counted and not charged.
+        "Not Active" is a check that was made and is billed like any other.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(DecisionMaker)
+            .join(Company, Company.id == DecisionMaker.company_id)
+            .where(Company.run_id == run_id, DecisionMaker.whatsapp_status.is_not(None))
         )
         result = await self.db.execute(stmt)
 
