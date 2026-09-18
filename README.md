@@ -188,6 +188,100 @@ VITE_API_BASE_URL=http://localhost:8000/api/v1
 `BACKEND_CORS_ORIGINS` in this project's `.env` already allows the Vite dev
 origin (`http://localhost:5173`).
 
+## The n8n lead-search workflow
+
+A Lead Radar search is not executed by this API. `POST /lead-radar/search`
+opens a run row, POSTs the job to `N8N_WEBHOOK_URL`, and returns. From then on
+n8n does the work and **calls back** into this API; the browser only watches.
+That is why a user can close the tab: the workflow keeps running, the results
+are saved and billed when they arrive, and an in-app notification is created
+for the user to find on their next visit (and pushed live if a tab is open).
+
+### The callbacks must reach this API
+
+`PUBLIC_API_URL` is the base of every callback URL handed to n8n
+(`progress_url`, `results_url`). It has to be reachable **from the n8n host**.
+With n8n on the VM and the API on a laptop that means a tunnel:
+
+```powershell
+ngrok http 8000
+# then put the https URL it prints into .env as PUBLIC_API_URL and restart
+```
+
+A free ngrok URL changes every time the agent restarts, and the old one
+answers `ERR_NGROK_3200` -- every callback from n8n is then lost and the run
+sits at "running" until the sweeper closes it. Reserve a static domain in the
+ngrok dashboard and start it with `ngrok http --url=<your-domain> 8000` so
+`PUBLIC_API_URL` (and the frontend's `VITE_API_BASE_URL`) stop changing.
+
+### What n8n sends
+
+Each progress node POSTs to `{{ $json.progress_url }}` with header
+`X-LeadPilot-Run-Token: {{ $json.progress_token }}`:
+
+```json
+{
+  "stage": "searching_companies",
+  "count": 42,
+  "message": "Searching web for target companies",
+  "execution_id": "{{ $execution.id }}"
+}
+```
+
+`stage` is one of `searching_companies`, `ai_analysing`, `domain_search`,
+`finding_decision_makers`, `finding_emails`, `verifying_contacts`; add
+`"status": "completed"` on the last one. `execution_id` is optional but send
+it on every checkpoint -- see the error trigger below for why. n8n's HTTP
+Request node runs once per input item, so tick **Execute Once** on these nodes
+or a 28-item input fires 28 identical callbacks.
+
+The results node POSTs the full company list to `{{ $json.results_url }}` with
+the same token header (see `SearchResultsRequest` in `app/schemas/lead.py`).
+
+### The Error Trigger workflow
+
+A separate workflow with an *Error Trigger* node catches any failure of the
+lead-search workflow. Its HTTP Request node POSTs to
+`<PUBLIC_API_URL>/api/v1/lead-radar/error` with exactly:
+
+```json
+{
+  "workflow_id": "{{ $json.workflow.id }}",
+  "execution_id": "{{ $json.execution.id }}",
+  "error_message": "{{ $json.execution.error.message }}",
+  "last_node_executed": "{{ $json.execution.lastNodeExecuted }}"
+}
+```
+
+That payload carries no run id, so the API works out whose search it was:
+
+1. `run_id` + `progress_token` in the body, if the workflow can pass them
+   through (exact);
+2. `execution_id`, matched against the id the progress callbacks reported
+   (exact -- this is why every checkpoint should send `execution_id`);
+3. otherwise the single search currently in flight, if there is exactly one.
+   With two or more running, nothing is guessed: the failure is stored, and
+   the sweeper closes the dead run a little later.
+
+The response says which rule matched (`attributed_by`). An attributed failure
+marks the run failed, stops the tracker, records the failing node, and
+notifies the user. With `N8N_WEBHOOK_SECRET` set, the error node must also
+send that secret in the `N8N_WEBHOOK_HEADER` header (default
+`X-LeadPilot-Token`); without a secret the endpoint stays open so an outage
+is never silently dropped.
+
+### Runs the workflow never finishes
+
+A background sweeper (started with the app, every
+`LEAD_SEARCH_SWEEP_INTERVAL_SECONDS`) fails:
+
+- a run with no checkpoint for `LEAD_SEARCH_STALE_MINUTES` (default 30);
+- a run whose last checkpoint said "completed" but whose results did not
+  arrive within `LEAD_SEARCH_RESULTS_TIMEOUT_MINUTES` (default 15) -- nothing
+  was saved or charged, so "failed" is the honest state.
+
+The user gets the same failure notification as for a reported error.
+
 ## What is intentionally left unimplemented
 
 `app/models/` is empty, and the `auth`/`users` route bodies raise

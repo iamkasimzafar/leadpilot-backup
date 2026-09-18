@@ -89,6 +89,14 @@ class LeadSearchRun(Base, TimestampMixin):
         String(64), index=True, nullable=False, default=_callback_token
     )
 
+    # The n8n execution handling this run, learned from the webhook's response
+    # or the first progress callback that carries `execution_id`. n8n's Error
+    # Trigger reports failures by execution id only, so this is how a failure
+    # finds its way back to the user whose search it was.
+    n8n_execution_id: Mapped[str | None] = mapped_column(
+        String(64), index=True, nullable=True
+    )
+
     original_keyword: Mapped[str] = mapped_column(String(255), nullable=False)
     # JSON-encoded list. A plain text column rather than JSON: portable across
     # MySQL and the SQLite used by the tests, and never queried by content.
@@ -153,6 +161,11 @@ class LeadSearchRun(Base, TimestampMixin):
 
     # Set when the workflow reports a failure, or the run is abandoned.
     error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # Short machine code for why it failed: the workflow's own `reason` when it
+    # sent one (no_valid_emails_found), otherwise classified from the text.
+    # A column, not a derived value, so failures can be counted by cause.
+    error_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # When the workflow's results callback was first ingested. Distinct from
     # finished_at: the last progress checkpoint usually closes the run seconds

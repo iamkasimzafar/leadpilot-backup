@@ -166,6 +166,10 @@ class StartSearchResponse(BaseModel):
     # Whether WhatsApp validation was requested, and what each check costs.
     validate_whatsapp: bool = False
     whatsapp_credits_per_check: int | None = None
+    # n8n's execution id, when the webhook's response carried one (a "Respond
+    # to Webhook" node returning `{{ $execution.id }}`). Lets a later Error
+    # Trigger report be tied to this run.
+    n8n_execution_id: str | None = None
 
 
 # --- Pricing -----------------------------------------------------------------
@@ -263,6 +267,9 @@ class SearchRunRead(BaseSchema):
     # Null until the workflow's results callback has been ingested. The UI
     # shows "collecting results" between finished_at and this.
     results_received_at: datetime | None = None
+    # The n8n execution handling this run, once known. Shown for debugging: it
+    # is the id to look up in n8n's executions list.
+    n8n_execution_id: str | None = None
     # Every checkpoint reported so far, oldest first.
     events: list[SearchEventRead] = Field(default_factory=list)
     # The checkpoint order the UI renders, so the stage list is server-driven.
@@ -278,16 +285,32 @@ class SearchRunPage(BaseModel):
     per_page: int
 
 
+def _unresolved(value: Any) -> bool:
+    """n8n sends the raw expression ("{{ $json.execution.id }}") when a field
+    could not be resolved; that is not a value."""
+    text = str(value).strip()
+
+    return text.startswith("{{") and text.endswith("}}")
+
+
 class WorkflowErrorRequest(BaseModel):
-    """What n8n's error trigger POSTs when the workflow fails.
+    """What n8n's Error Trigger workflow POSTs when the lead-search workflow
+    fails. This is exactly the body its HTTP Request node sends:
 
-    Every field is optional except the message: n8n's error payload is
-    best-effort, and a failure must never be lost to a validation error.
+        {
+          "workflow_id": "{{ $json.workflow.id }}",
+          "execution_id": "{{ $json.execution.id }}",
+          "error_message": "{{ $json.execution.error.message }}",
+          "last_node_executed": "{{ $json.execution.lastNodeExecuted }}"
+        }
 
-    `run_id` and `progress_token` are NOT part of n8n's error trigger. Pass
-    them through from the webhook data if you can -- they are what lets the
-    failure be shown to the user whose search it was, instead of only being
-    logged.
+    Every field is optional: n8n's error payload is best-effort, and a failure
+    must never be lost to a validation error.
+
+    The failure is tied to a user's run by `execution_id` -- the run learns its
+    execution id from the progress callbacks (send `execution_id` alongside
+    `stage`) or from the webhook's response. `run_id` + `progress_token` are
+    accepted too for a workflow that can pass them through.
     """
 
     workflow_id: str | None = Field(default=None, max_length=64)
@@ -301,24 +324,38 @@ class WorkflowErrorRequest(BaseModel):
     @field_validator("error_message", mode="before")
     @classmethod
     def _readable(cls, value: Any) -> Any:
-        """n8n sends the unresolved expression when a field is missing."""
-        if value is None:
+        if value is None or _unresolved(value):
             return ""
+
+        return str(value).strip()
+
+    @field_validator(
+        "workflow_id",
+        "execution_id",
+        "last_node_executed",
+        "run_id",
+        "progress_token",
+        mode="before",
+    )
+    @classmethod
+    def _optional(cls, value: Any) -> Any:
+        """An unresolved expression is as good as absent. n8n also hands
+        numeric ids over as numbers; they are compared as strings here."""
+        if value is None or _unresolved(value):
+            return None
 
         text = str(value).strip()
 
-        # "{{ $json.execution.error.message }}" arrives verbatim when the
-        # expression could not resolve; that is not an error message.
-        if text.startswith("{{") and text.endswith("}}"):
-            return ""
-
-        return text
+        return text or None
 
 
 class WorkflowErrorResponse(BaseModel):
     recorded: bool
     # True when the failure was tied to a search run and its owner notified.
     attributed: bool
+    # How the run was found: "run_token", "execution_id" or "sole_running_run".
+    # None when it could not be attributed.
+    attributed_by: str | None = None
     reason: str = Field(description="Classified cause, e.g. rate_limited.")
 
 
@@ -327,6 +364,10 @@ class ProgressCallbackRequest(BaseModel):
 
     Only `stage` is required. `status: "completed"` (or `stage: "completed"`)
     closes the run; `error` fails it.
+
+    `execution_id` (`{{ $execution.id }}` in n8n) is optional but worth
+    sending on every checkpoint: it is what lets a later Error Trigger report,
+    which only knows the execution id, be attributed to this run.
     """
 
     stage: str = Field(min_length=1, max_length=32)
@@ -334,6 +375,17 @@ class ProgressCallbackRequest(BaseModel):
     count: int | None = Field(default=None, ge=0)
     status: str | None = Field(default=None, max_length=16)
     error: str | None = Field(default=None, max_length=500)
+    execution_id: str | None = Field(default=None, max_length=64)
+
+    @field_validator("execution_id", mode="before")
+    @classmethod
+    def _execution_id(cls, value: Any) -> Any:
+        if value is None or _unresolved(value):
+            return None
+
+        text = str(value).strip()
+
+        return text or None
 
 
 class ExpandKeywordResponse(BaseModel):

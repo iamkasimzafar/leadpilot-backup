@@ -24,6 +24,60 @@ class LeadSearchRunRepository(BaseRepository[LeadSearchRun]):
         """
         return await self.find_one_by(id=run_id, callback_token=token)
 
+    async def get_by_execution_id(self, execution_id: str) -> LeadSearchRun | None:
+        """The run an n8n execution is handling, once a callback told us which.
+
+        Execution ids are unique within an n8n instance, so a match is exact.
+        """
+        return await self.find_one_by(n8n_execution_id=execution_id)
+
+    async def sole_running_since(self, since: datetime) -> LeadSearchRun | None:
+        """The one run in flight, if there is exactly one.
+
+        The Error Trigger's payload carries no run id. When only a single
+        search is running, the failing execution can only be that one; with
+        two or more it is ambiguous and nothing is returned.
+        """
+        stmt = (
+            select(LeadSearchRun)
+            .where(
+                LeadSearchRun.status == RunStatus.RUNNING.value,
+                LeadSearchRun.created_at >= since,
+            )
+            .limit(2)
+        )
+        result = await self.db.execute(stmt)
+        runs = list(result.scalars().all())
+
+        return runs[0] if len(runs) == 1 else None
+
+    async def list_stale_running(self, cutoff: datetime) -> list[LeadSearchRun]:
+        """Runs still marked running with no activity since `cutoff`.
+
+        `updated_at` is touched by every progress callback, so it is the time
+        of the last checkpoint (or of dispatch, for a run n8n never reported
+        on at all).
+        """
+        stmt = select(LeadSearchRun).where(
+            LeadSearchRun.status == RunStatus.RUNNING.value,
+            LeadSearchRun.updated_at < cutoff,
+        )
+        result = await self.db.execute(stmt)
+
+        return list(result.scalars().all())
+
+    async def list_awaiting_results(self, cutoff: datetime) -> list[LeadSearchRun]:
+        """Runs whose last checkpoint said "completed" before `cutoff` but whose
+        results callback never arrived."""
+        stmt = select(LeadSearchRun).where(
+            LeadSearchRun.status == RunStatus.COMPLETED.value,
+            LeadSearchRun.results_received_at.is_(None),
+            LeadSearchRun.finished_at < cutoff,
+        )
+        result = await self.db.execute(stmt)
+
+        return list(result.scalars().all())
+
     async def count_created_since(self, user_id: str, since: datetime) -> int:
         """Searches this user started at or after `since`."""
         stmt = (

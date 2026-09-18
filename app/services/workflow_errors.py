@@ -7,17 +7,19 @@ and whether they should retry or wait. `explain()` is that translation; the
 raw text is still stored and shown as detail for whoever debugs it.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.models.lead_search import LeadSearchRun, RunStatus
 from app.models.notification import NotificationKind
 from app.models.workflow_error import WorkflowError
 from app.repositories.base import BaseRepository
 from app.repositories.lead_search import LeadSearchRunRepository
+from app.schemas.lead_radar import WorkflowErrorRequest
 from app.services.base import BaseService
 from app.services.notification import NotificationService
 from app.services.progress_stream import progress_stream
@@ -51,6 +53,10 @@ _PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
         "unreachable",
     ),
     (("json", "parse", "unexpected token"), "bad_response"),
+    # The workflow found companies but not one verifiable address among their
+    # decision makers. Not an outage: a different keyword or looser filters
+    # is the fix, so it is "retryable" in the sense of trying again differently.
+    (("no valid email", "zero valid email", "no emails found"), "no_valid_emails_found"),
 )
 
 # What each reason means for the user, and whether retrying is worth it.
@@ -61,6 +67,7 @@ REASONS: dict[str, bool] = {
     "timeout": True,
     "unreachable": True,
     "bad_response": True,
+    "no_valid_emails_found": True,
     "unknown": True,
 }
 
@@ -102,6 +109,54 @@ class WorkflowErrorService(BaseService):
     async def latest_for_run(self, run_id: str) -> WorkflowError | None:
         return await self.errors.latest_for_run(run_id)
 
+    async def attribute(
+        self, payload: WorkflowErrorRequest
+    ) -> tuple[LeadSearchRun | None, str | None]:
+        """Find the run an Error Trigger report belongs to.
+
+        n8n's error payload identifies the failed *execution*, never our run,
+        so this works down a ladder from exact to inferred, and says which rung
+        matched:
+
+        1. `run_token`: the workflow passed `run_id` + `progress_token`
+           through. Exact -- and a pair that does not match is a bad caller,
+           not a missing id, so nothing below is tried for it.
+        2. `execution_id`: a progress callback (or the webhook's reply) already
+           told us which execution handles which run. Exact.
+        3. `sole_running_run`: nothing carried an id, but exactly one search is
+           in flight, so the failing execution can only be that one. With two
+           or more running the report stays unattributed rather than risk
+           failing the wrong user's search.
+        """
+        if payload.run_id and payload.progress_token:
+            run = await self.runs.get_for_callback(payload.run_id, payload.progress_token)
+            if run is not None:
+                return run, "run_token"
+
+            log.warning("workflow_error.bad_run_token", run_id=payload.run_id)
+            return None, None
+
+        if payload.execution_id:
+            run = await self.runs.get_by_execution_id(payload.execution_id)
+            if run is not None:
+                return run, "execution_id"
+
+        since = datetime.now(UTC) - timedelta(minutes=settings.LEAD_SEARCH_STALE_MINUTES)
+        run = await self.runs.sole_running_since(since)
+        if run is None:
+            return None, None
+
+        # The one run in flight is already known to belong to a different
+        # execution: this failure is not its.
+        if (
+            payload.execution_id
+            and run.n8n_execution_id
+            and run.n8n_execution_id != payload.execution_id
+        ):
+            return None, None
+
+        return run, "sole_running_run"
+
     async def record(
         self,
         *,
@@ -110,6 +165,7 @@ class WorkflowErrorService(BaseService):
         error_message: str,
         last_node_executed: str | None,
         run: LeadSearchRun | None,
+        attributed_by: str | None = None,
     ) -> WorkflowError:
         """Store the failure and, when it belongs to a run, fail that run and
         tell the user.
@@ -130,13 +186,11 @@ class WorkflowErrorService(BaseService):
 
         notification = None
 
-        if run is not None and run.status == RunStatus.RUNNING.value:
-            # Close the run so the tracker stops spinning. The user-facing
-            # reason goes in `error`; the raw n8n text stays on this row.
-            run.status = RunStatus.FAILED.value
-            run.error = f"{reason}: {error_message}"[:500]
-            run.finished_at = datetime.now(UTC)
+        # The report just told us which execution this run belongs to.
+        if run is not None and execution_id and not run.n8n_execution_id:
+            run.n8n_execution_id = execution_id[:64]
 
+        if run is not None and await self._fail_run(run, reason, error_message):
             notification = await self.notifications.create(
                 run.user_id,
                 kind=NotificationKind.MONITOR,
@@ -161,11 +215,57 @@ class WorkflowErrorService(BaseService):
             "workflow.error_reported",
             reason=reason,
             run_id=run.id if run else None,
+            attributed_by=attributed_by,
             execution_id=execution_id,
             node=last_node_executed,
         )
 
         return error
+
+    async def _fail_run(
+        self, run: LeadSearchRun, reason: str, error_message: str
+    ) -> bool:
+        """Fail the run this error belongs to, if it is still waiting on the
+        workflow. Returns True when this call is the one that failed it.
+
+        "Still waiting" is wider than "running". The workflow's last progress
+        checkpoint says `status: completed` BEFORE the final branches run and
+        before the results are posted, so a crash in those last nodes reaches
+        us seconds after the run was closed as completed. No results will ever
+        follow, so that run has failed -- leaving it "completed" would show
+        the user "collecting results" until the sweeper gave up on it.
+
+        What is never touched: a run whose results arrived or was billed (the
+        search delivered; a late error is noise), and one already failed.
+        Decided by a conditional UPDATE, not by reading `run.status`, so it
+        holds when the error and a callback land at the same moment.
+        """
+        await self.db.flush()
+
+        result = await self.db.execute(
+            update(LeadSearchRun)
+            .where(
+                LeadSearchRun.id == run.id,
+                LeadSearchRun.status.in_(
+                    [RunStatus.RUNNING.value, RunStatus.COMPLETED.value]
+                ),
+                LeadSearchRun.results_received_at.is_(None),
+                LeadSearchRun.credits_charged_at.is_(None),
+            )
+            .values(
+                status=RunStatus.FAILED.value,
+                # The user-facing reason goes in `error`; the raw n8n text
+                # stays on the workflow_error row.
+                error=f"{reason}: {error_message}"[:500],
+                error_reason=reason,
+                finished_at=datetime.now(UTC),
+            )
+        )
+        failed = bool(result.rowcount == 1)  # type: ignore[attr-defined]
+
+        await self.db.refresh(run)
+
+        return failed
 
 
 __all__ = ["REASONS", "WorkflowErrorService", "explain"]

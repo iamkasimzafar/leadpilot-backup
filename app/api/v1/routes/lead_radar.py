@@ -6,14 +6,17 @@ from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Header, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
+from jwt.exceptions import InvalidTokenError
 from sqlalchemy.exc import OperationalError
 
 from app.api.deps import CurrentUser, DbSession, Pagination
+from app.core.config import settings
 from app.core.exceptions import (
     InsufficientCreditsError,
     NotFoundError,
     UnauthorizedError,
     UpstreamError,
+    ValidationError,
 )
 from app.core.logging import get_logger
 from app.core.security import decode_token
@@ -179,7 +182,7 @@ async def start_search(
     )
 
     try:
-        return await LeadSearchService().start(
+        started = await LeadSearchService().start(
             payload.original_keyword,
             payload.expanded_keywords,
             auto_add_to_leads=payload.auto_add_to_leads,
@@ -194,9 +197,18 @@ async def start_search(
         )
     except UpstreamError as exc:
         # The run exists but nothing is coming: close it so the UI does not sit
-        # on a spinner forever.
-        await progress.mark_dispatch_failed(run, exc.message)
+        # on a spinner forever. If even that fails, the original error is the
+        # one worth surfacing; the sweeper will close the run later.
+        try:
+            await progress.mark_dispatch_failed(run, exc.message)
+        except Exception:
+            log.exception("lead_search.mark_dispatch_failed_failed", run_id=run.id)
         raise
+
+    if started.n8n_execution_id:
+        await progress.attach_execution_id(run, started.n8n_execution_id)
+
+    return started
 
 
 @router.get(
@@ -253,13 +265,15 @@ async def get_run(run_id: str, db: DbSession, current_user: CurrentUser) -> Sear
     # reason and the node it died on, so the UI can advise rather than dump
     # n8n's raw text at the user.
     if run.status == RunStatus.FAILED.value:
+        # The reason the workflow itself sent (stored on the run) beats any
+        # guess made from the text.
         failure = await WorkflowErrorService(db).latest_for_run(run.id)
         if failure is not None:
-            payload.error_reason = explain(failure.error_message)
+            payload.error_reason = run.error_reason or explain(failure.error_message)
             payload.error_node = failure.last_node_executed
             payload.error = failure.error_message[:500]
         elif run.error:
-            payload.error_reason = explain(run.error)
+            payload.error_reason = run.error_reason or explain(run.error)
 
     return payload
 
@@ -287,7 +301,9 @@ async def report_progress(
     searching_companies, ai_analysing, domain_search,
     finding_decision_makers, finding_emails, verifying_contacts.
     Add `"status": "completed"` on the final call, or `"error": "..."` to fail
-    the run. `message` and `count` are optional detail.
+    the run. `message` and `count` are optional detail. Include
+    `"execution_id": "{{ $execution.id }}"` so a failure reported later by the
+    Error Trigger (which only knows the execution id) reaches this run.
     """
     service = LeadSearchProgressService(db)
     run = await service.runs.get_for_callback(run_id, x_leadpilot_run_token)
@@ -305,6 +321,7 @@ async def report_progress(
         count=payload.count,
         status=payload.status,
         error=payload.error,
+        execution_id=payload.execution_id,
     )
 
     return Message(message="Progress recorded.")
@@ -320,28 +337,40 @@ async def submit_results(
     payload: SearchResultsRequest,
     db: DbSession,
     x_leadpilot_run_token: str = Header(..., alias="X-LeadPilot-Run-Token"),
+    x_leadpilot_run_id: str | None = Header(None, alias="X-LeadPilot-Run-Id"),
 ) -> SearchResultsResponse:
-    """Called once by n8n with the complete company + decision-maker output.
+    """Called once by n8n with the workflow's final word: the complete
+    company + decision-maker output, or a failure.
 
-    `run_id` travels in the body (not the URL) to match the workflow payload.
-    Authenticated by the same per-run token as the progress callbacks.
+    `run_id` is taken from the body, or from the `X-LeadPilot-Run-Id` header
+    when the body has none -- the failure branch of the workflow sends only
+    `{"status": "failed", "reason": ..., "message": ...}`, and a header is
+    easier to add to that node than rebuilding the body. Authenticated by the
+    same per-run token as the progress callbacks.
 
-    This also closes the run: it is the workflow's last word, so the tracker
-    flips to complete and the user is notified. Safe to retry -- a company
-    already saved is refreshed rather than duplicated, and its decision makers
-    are replaced rather than appended.
+    A failure (`status: "failed"`, or an `error`/`reason`) fails the run and
+    charges nothing; `reason` is stored so failures can be counted by cause.
+    Success closes the run, settles the bill, and notifies the user. Safe to
+    retry -- a company already saved is refreshed rather than duplicated, and
+    its decision makers are replaced rather than appended.
     """
+    run_id = payload.run_id or x_leadpilot_run_id
+    if not run_id:
+        raise ValidationError(
+            "run_id is required: send it in the body or as X-LeadPilot-Run-Id."
+        )
+
     # A deadlock means MySQL already rolled us back and wants a retry. It can
     # still happen when two DIFFERENT runs save overlapping companies at the
     # same moment (the per-run lock in ingest() does not cover that), so try
     # a few times with a short back-off before giving up.
     for attempt in range(RESULTS_DEADLOCK_RETRIES):
         run = await LeadSearchProgressService(db).runs.get_for_callback(
-            payload.run_id, x_leadpilot_run_token
+            run_id, x_leadpilot_run_token
         )
 
         if run is None:
-            log.warning("lead_results.rejected", run_id=payload.run_id)
+            log.warning("lead_results.rejected", run_id=run_id)
             raise UnauthorizedError("Invalid run or token.")
 
         try:
@@ -364,47 +393,54 @@ async def submit_results(
     summary="Error callback for the n8n workflow",
 )
 async def report_workflow_error(
-    payload: WorkflowErrorRequest, db: DbSession
+    payload: WorkflowErrorRequest,
+    db: DbSession,
+    shared_secret: str | None = Header(default=None, alias=settings.N8N_WEBHOOK_HEADER),
 ) -> WorkflowErrorResponse:
-    """Called by n8n's Error Trigger when the workflow fails.
-
-    Accepts the error-trigger payload as-is:
+    """Called by n8n's Error Trigger workflow when the lead-search workflow
+    fails. Accepts its payload exactly as the HTTP Request node sends it:
 
         {
-          "workflow_id": "...", "execution_id": "...",
-          "error_message": "...", "last_node_executed": "..."
+          "workflow_id": "{{ $json.workflow.id }}",
+          "execution_id": "{{ $json.execution.id }}",
+          "error_message": "{{ $json.execution.error.message }}",
+          "last_node_executed": "{{ $json.execution.lastNodeExecuted }}"
         }
 
-    Add `run_id` and `progress_token` (pass them through from the webhook
-    data) and the failure is attributed: the user's run is marked failed, the
-    progress tracker stops spinning, and they get a notification. Without
-    them the error is still stored and logged, but no user can be told.
+    The failure is attributed to a run by `execution_id` (learned from the
+    progress callbacks), by `run_id` + `progress_token` if the workflow passes
+    them through, or -- when neither is available -- to the only run in
+    flight. An attributed failure marks the run failed, stops the tracker and
+    notifies the user; an unattributed one is still stored and logged, and the
+    stale-run sweeper closes the run later.
 
-    Deliberately unauthenticated in the same way the other callbacks are
-    token-scoped: n8n's Error Trigger cannot add headers per run, and refusing
-    an unattributed failure would mean losing the evidence of an outage. The
-    endpoint only ever writes a log row; attribution requires the run token.
+    Authentication: the Error Trigger runs in its own workflow, so it cannot
+    quote a per-run token. When N8N_WEBHOOK_SECRET is set, this endpoint
+    requires the same secret in the N8N_WEBHOOK_HEADER header (add it to the
+    HTTP Request node). With no secret configured it stays open, because
+    refusing an unattributed failure would mean losing the evidence of an
+    outage.
     """
-    run = None
+    if settings.N8N_WEBHOOK_SECRET and shared_secret != settings.N8N_WEBHOOK_SECRET:
+        log.warning("workflow_error.rejected", reason="bad shared secret")
+        raise UnauthorizedError("Invalid workflow secret.")
 
-    if payload.run_id and payload.progress_token:
-        run = await LeadSearchProgressService(db).runs.get_for_callback(
-            payload.run_id, payload.progress_token
-        )
-        if run is None:
-            log.warning("workflow_error.bad_run_token", run_id=payload.run_id)
+    service = WorkflowErrorService(db)
+    run, attributed_by = await service.attribute(payload)
 
-    error = await WorkflowErrorService(db).record(
+    error = await service.record(
         workflow_id=payload.workflow_id,
         execution_id=payload.execution_id,
         error_message=payload.error_message or "The workflow reported a failure.",
         last_node_executed=payload.last_node_executed,
         run=run,
+        attributed_by=attributed_by,
     )
 
     return WorkflowErrorResponse(
         recorded=True,
         attributed=run is not None,
+        attributed_by=attributed_by,
         reason=explain(error.error_message),
     )
 
@@ -438,7 +474,7 @@ async def stream_progress(
     """
     try:
         payload = decode_token(token, expected_type="access")
-    except Exception as exc:
+    except InvalidTokenError as exc:
         raise UnauthorizedError("Invalid or expired token.") from exc
 
     user_id = payload.get("sub")
@@ -453,6 +489,12 @@ async def stream_progress(
     run = await LeadSearchProgressService(db).runs.get_for_user(user.id, run_id)
     if run is None:
         raise NotFoundError("No search run with that id.")
+
+    # The stream needs no database from here on, but FastAPI keeps the session
+    # dependency open until the response ends -- for SSE that is as long as
+    # the tab stays on the page, and every open tab would pin one pooled
+    # connection (pool_size + max_overflow is 15 by default). Hand it back now.
+    await db.close()
 
     async def events() -> AsyncGenerator[str, None]:
         async with progress_stream.subscribe(user.id) as queue:

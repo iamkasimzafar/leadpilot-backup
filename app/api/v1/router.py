@@ -11,6 +11,7 @@ from app.api.v1.routes import (
     leads,
     notification_preferences,
     notifications,
+    reports,
     users,
 )
 
@@ -23,6 +24,7 @@ api_router.include_router(lead_radar.router, prefix="/lead-radar", tags=["lead-r
 api_router.include_router(billing.router, prefix="/billing", tags=["billing"])
 api_router.include_router(leads.router, prefix="/leads", tags=["leads"])
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
+api_router.include_router(reports.router, prefix="/reports", tags=["reports"])
 api_router.include_router(
     notifications.router, prefix="/notifications", tags=["notifications"]
 )

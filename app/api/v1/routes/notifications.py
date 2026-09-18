@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
+from jwt.exceptions import InvalidTokenError
 
 from app.api.deps import CurrentUser, DbSession, Pagination
 from app.core.exceptions import UnauthorizedError
@@ -113,7 +114,7 @@ async def stream(request: Request, db: DbSession, token: str = Query(...)) -> Re
     """
     try:
         payload = decode_token(token, expected_type="access")
-    except Exception as exc:
+    except InvalidTokenError as exc:
         # Any decode failure -- bad signature, wrong type, expired -- is a 401.
         raise UnauthorizedError("Invalid or expired token.") from exc
 
@@ -124,6 +125,11 @@ async def stream(request: Request, db: DbSession, token: str = Query(...)) -> Re
     user = await UserRepository(db).get(user_id)
     if user is None or not user.is_active:
         raise UnauthorizedError("User no longer active.")
+
+    # The stream needs no database from here on, but FastAPI keeps the session
+    # dependency open until the response ends -- for SSE that is hours, and
+    # every open tab would pin one pooled connection. Hand it back now.
+    await db.close()
 
     async def events() -> AsyncGenerator[str, None]:
         async with notification_stream.subscribe(user.id) as queue:

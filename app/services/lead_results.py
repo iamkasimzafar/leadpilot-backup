@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.logging import get_logger
 from app.models.lead import Company, DecisionMaker
@@ -28,6 +29,7 @@ from app.services.leads import LeadService
 from app.services.notification import NotificationService
 from app.services.progress_stream import progress_stream
 from app.services.search_pricing import cost_lines, total_credits
+from app.services.workflow_errors import explain
 
 log = get_logger(__name__)
 
@@ -138,7 +140,12 @@ class LeadResultsService(BaseService):
         total = await self.companies.count_for_run(run.id)
         contact_total = await self.contacts.count_for_run(run.id)
 
-        failed = payload.status == "failed" or payload.error is not None
+        failed = payload.is_failed
+
+        # The workflow's own code wins; text-matching is the fallback for a
+        # workflow that only sent a message.
+        error_text = (payload.error_text or "The workflow reported a failure.")[:500]
+        error_reason = payload.reason or explain(error_text) if failed else None
 
         # Two separate facts, each decided by its own conditional UPDATE so
         # they hold under real concurrency (every parallel request reads the
@@ -178,19 +185,39 @@ class LeadResultsService(BaseService):
         closing: dict[str, object] = {"finished_at": now}
         if failed:
             closing["status"] = RunStatus.FAILED.value
-            closing["error"] = (payload.error or "The workflow reported a failure.")[:500]
+            closing["error"] = error_text
+            closing["error_reason"] = error_reason
         else:
             closing["status"] = RunStatus.COMPLETED.value
             closing["stage"] = SearchStage.COMPLETED.value
 
+        # Success only closes a run that is still running. A failure is the
+        # workflow's last word, so it also overrides a "completed" that the
+        # final progress checkpoint set seconds earlier -- but never a run
+        # that has already been settled, and never a failure already recorded.
+        closable: tuple[ColumnElement[bool], ...]
+        if failed:
+            closable = (
+                LeadSearchRun.status != RunStatus.FAILED.value,
+                LeadSearchRun.credits_charged_at.is_(None),
+            )
+        else:
+            closable = (LeadSearchRun.status == RunStatus.RUNNING.value,)
+
         await self.db.execute(
             update(LeadSearchRun)
-            .where(
-                LeadSearchRun.id == run.id,
-                LeadSearchRun.status == RunStatus.RUNNING.value,
-            )
+            .where(LeadSearchRun.id == run.id, *closable)
             .values(**closing)
         )
+
+        if failed:
+            log.warning(
+                "lead_results.failed",
+                run_id=run.id,
+                user_id=run.user_id,
+                reason=error_reason,
+                message=error_text,
+            )
 
         await self.db.refresh(run)
 
@@ -311,9 +338,11 @@ class LeadResultsService(BaseService):
         self, existing: Company, run: LeadSearchRun, values: dict[str, Any]
     ) -> Company:
         """Update a company we already hold with what the workflow sent now.
-        Keeps whatever we had when the new payload omits a field."""
+        Keeps whatever we had when the new payload omits a field -- an empty
+        string counts as omitted, so a blank in the payload never wipes a
+        value we already know."""
         for key, value in values.items():
-            if value not in (None, "{}"):
+            if value not in (None, "", "{}"):
                 setattr(existing, key, value)
         existing.run_id = run.id
         await self.db.flush()

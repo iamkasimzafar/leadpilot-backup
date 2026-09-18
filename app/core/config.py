@@ -100,6 +100,17 @@ class Settings(BaseSettings):
     # works if n8n runs on the same machine.
     PUBLIC_API_URL: str = "http://localhost:8000"
 
+    # Watchdog for runs the workflow never finished. n8n reports progress by
+    # calling back; if it dies mid-run (or its Error Trigger cannot be tied to
+    # our run) nothing else would ever close the row, and the user's tracker
+    # would spin forever. A run with no checkpoint for STALE_MINUTES is failed;
+    # a run whose last checkpoint said "completed" but whose results never
+    # arrived within RESULTS_TIMEOUT_MINUTES is failed too (nothing was saved
+    # and nothing is charged). 0 for the interval disables the sweeper.
+    LEAD_SEARCH_STALE_MINUTES: int = 30
+    LEAD_SEARCH_RESULTS_TIMEOUT_MINUTES: int = 15
+    LEAD_SEARCH_SWEEP_INTERVAL_SECONDS: int = 60
+
     # --- Database (MySQL) --------------------------------------------------
     MYSQL_HOST: str = "127.0.0.1"
     MYSQL_PORT: int = 3306

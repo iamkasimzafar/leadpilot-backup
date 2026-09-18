@@ -1,5 +1,6 @@
 """Lead result schemas: what n8n posts, and what we hand back."""
 
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -199,22 +200,70 @@ class CompanyIn(BaseModel):
 
 
 class SearchResultsRequest(BaseModel):
-    """The full result payload posted by the workflow when it finishes.
+    """The final payload posted by the workflow when it finishes.
 
-    `run_id` lives in the body (not the URL) to match the shape the n8n
-    workflow already builds.
+    Two shapes arrive on this endpoint and both must work:
+
+      success   {"run_id": ..., "status": "completed", "companies": [...]}
+      failure   {"status": "failed", "reason": "no_valid_emails_found",
+                 "message": "Zero valid emails were found ..."}
+
+    `run_id` is read from the body when present, otherwise from the
+    `X-LeadPilot-Run-Id` header (see the route), so the failure branch of the
+    workflow does not have to rebuild the success body. `reason` is a short
+    machine code the workflow chooses; it is stored as-is so failures can be
+    counted by cause. `message` and `error` are the same thing under two
+    names -- the human-readable text.
     """
 
-    run_id: str = Field(min_length=1, max_length=36)
+    run_id: str | None = Field(default=None, min_length=1, max_length=36)
     status: str = Field(default="completed", max_length=16)
     total_companies: int | None = Field(default=None, ge=0)
     companies: list[CompanyIn] = Field(default_factory=list, max_length=1000)
     error: str | None = Field(default=None, max_length=500)
+    message: str | None = Field(default=None, max_length=500)
+    reason: str | None = Field(default=None, max_length=64)
 
     @field_validator("companies", mode="before")
     @classmethod
     def _tolerate_missing_list(cls, value: Any) -> Any:
         return value if value is not None else []
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _lower_status(cls, value: Any) -> Any:
+        """"FAILED", "Failed" and "failed" all mean the same thing."""
+        return value.strip().lower() if isinstance(value, str) else value
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _code_reason(cls, value: Any) -> Any:
+        """Normalise to a snake_case code: "No Valid Emails Found" becomes
+        no_valid_emails_found, so one cause is always spelled one way."""
+        if not isinstance(value, str):
+            return value
+
+        code = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+
+        return code or None
+
+    @field_validator("error", "message", mode="before")
+    @classmethod
+    def _clean_text(cls, value: Any) -> Any:
+        return _blank_to_none(value)
+
+    @property
+    def is_failed(self) -> bool:
+        """A failure is anything that says so: the status, an error text, or
+        a reason code -- a reason is only ever sent for a failure."""
+        return (
+            self.status == "failed" or self.error is not None or self.reason is not None
+        )
+
+    @property
+    def error_text(self) -> str | None:
+        """The human-readable failure text, whichever key it came under."""
+        return self.error or self.message
 
 
 class SearchResultsResponse(BaseModel):

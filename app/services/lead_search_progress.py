@@ -102,6 +102,19 @@ class LeadSearchProgressService(BaseService):
 
         progress_stream.publish(run.user_id, run.id)
 
+    async def attach_execution_id(self, run: LeadSearchRun, execution_id: str) -> None:
+        """Remember which n8n execution took the job, so its Error Trigger can
+        be tied back to this run. First value wins; a repeat is a no-op."""
+        if run.n8n_execution_id:
+            return
+
+        run.n8n_execution_id = execution_id[:64]
+        await self.commit()
+
+        log.info(
+            "lead_search.execution_attached", run_id=run.id, execution_id=execution_id
+        )
+
     # --- Reads --------------------------------------------------------------
     async def get_for_user(self, user_id: str, run_id: str) -> LeadSearchRun:
         run = await self.runs.get_for_user(user_id, run_id)
@@ -134,6 +147,7 @@ class LeadSearchProgressService(BaseService):
         count: int | None = None,
         status: str | None = None,
         error: str | None = None,
+        execution_id: str | None = None,
     ) -> LeadSearchEvent:
         """Record one checkpoint reported by the workflow.
 
@@ -153,6 +167,14 @@ class LeadSearchProgressService(BaseService):
             message=message[:500] if message else None,
             count=count,
         )
+
+        # Any checkpoint is proof the workflow is alive. `updated_at` is what
+        # the stale-run sweeper reads, so touch it even when nothing else on
+        # the row changes (a repeated checkpoint with the same count).
+        run.updated_at = datetime.now(UTC)
+
+        if execution_id and not run.n8n_execution_id:
+            run.n8n_execution_id = execution_id[:64]
 
         completing = (
             status == RunStatus.COMPLETED.value or reported is SearchStage.COMPLETED

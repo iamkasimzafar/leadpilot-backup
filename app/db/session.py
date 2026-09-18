@@ -27,6 +27,15 @@ def _create_engine() -> AsyncEngine:
             pool_recycle=settings.DB_POOL_RECYCLE,
             pool_pre_ping=True,
         )
+
+    # Every timestamp the app writes itself is UTC (datetime.now(UTC)), but
+    # server-side defaults (created_at / updated_at via NOW()) follow the MySQL
+    # server's own time zone, which is not UTC on the hosted database. Mixing
+    # the two skewed run durations by hours and would break any "older than N
+    # minutes" comparison. Pinning the session zone makes NOW() UTC as well.
+    if url.startswith("mysql"):
+        kwargs["connect_args"] = {"init_command": "SET time_zone = '+00:00'"}
+
     return create_async_engine(url, **kwargs)
 
 

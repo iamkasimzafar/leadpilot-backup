@@ -178,15 +178,20 @@ async def test_a_wrong_token_is_not_attributed_but_still_recorded(
     assert run["status"] == "running"
 
 
-async def test_an_error_after_completion_does_not_reopen_the_run(
+async def test_an_error_after_the_results_arrived_does_not_reopen_the_run(
     client: AsyncClient, db_session, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The search delivered: a late error from some trailing node is noise."""
     headers, run_id, token = await _start_run(client, db_session, monkeypatch)
-    await client.post(
-        f"{PREFIX}/lead-radar/runs/{run_id}/progress",
-        json={"stage": "verifying_contacts", "status": "completed"},
+    delivered = await client.post(
+        f"{PREFIX}/lead-radar/results",
+        json={
+            "run_id": run_id,
+            "companies": [{"company_name": "Acme", "website": "https://acme.test"}],
+        },
         headers={"X-LeadPilot-Run-Token": token},
     )
+    assert delivered.status_code == 201
 
     await client.post(
         ERROR,
@@ -195,6 +200,51 @@ async def test_an_error_after_completion_does_not_reopen_the_run(
 
     run = (await client.get(f"{PREFIX}/lead-radar/runs/{run_id}", headers=headers)).json()
     assert run["status"] == "completed"
+    assert run["error"] is None
+
+
+async def test_an_error_after_the_last_checkpoint_but_before_results_fails_the_run(
+    client: AsyncClient, db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real workflow says `status: completed` on its last checkpoint, then
+    runs a few more nodes before posting results. A crash in those nodes lands
+    seconds after the run was closed; no results will ever follow, so the run
+    has failed and must say so rather than sit on "collecting results"."""
+    headers, run_id, token = await _start_run(client, db_session, monkeypatch)
+    await client.post(
+        f"{PREFIX}/lead-radar/runs/{run_id}/progress",
+        json={
+            "stage": "verifying_contacts",
+            "status": "completed",
+            "execution_id": "135",
+        },
+        headers={"X-LeadPilot-Run-Token": token},
+    )
+
+    response = await client.post(
+        ERROR,
+        json={
+            "workflow_id": "gNUAhBc2Amn0ywf4",
+            "execution_id": "135",
+            "error_message": (
+                "Paired item data for item from node 'Filter & Limit Prospects' "
+                "is unavailable."
+            ),
+            "last_node_executed": "Has Phone Number?",
+        },
+    )
+    assert response.json()["attributed_by"] == "execution_id"
+
+    run = (await client.get(f"{PREFIX}/lead-radar/runs/{run_id}", headers=headers)).json()
+    assert run["status"] == "failed"
+    assert run["error_node"] == "Has Phone Number?"
+    assert "Paired item data" in run["error"]
+    assert run["credits_charged"] == 0
+
+    notifications = await client.get(f"{PREFIX}/notifications", headers=headers)
+    newest = notifications.json()["items"][0]
+    assert "failed" in newest["title"]
+    assert "Has Phone Number?" in newest["subtitle"]
 
 
 # --- Classification ----------------------------------------------------------

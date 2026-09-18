@@ -138,6 +138,10 @@ class LeadSearchService:
             "progress_url": (
                 f"{base}{settings.API_V1_PREFIX}/lead-radar/runs/{run_id}/progress"
             ),
+            # Where the final results -- or the failure -- are POSTed, with
+            # `progress_token` as X-LeadPilot-Run-Token and `run_id` as
+            # X-LeadPilot-Run-Id (or in the body).
+            "results_url": f"{base}{settings.API_V1_PREFIX}/lead-radar/results",
             "progress_token": callback_token,
         }
 
@@ -145,7 +149,7 @@ class LeadSearchService:
         if settings.N8N_WEBHOOK_SECRET:
             headers[settings.N8N_WEBHOOK_HEADER] = settings.N8N_WEBHOOK_SECRET
 
-        await self._post(payload, headers)
+        execution_id = await self._post(payload, headers)
 
         log.info(
             "lead_search.dispatched",
@@ -176,9 +180,38 @@ class LeadSearchService:
             whatsapp_credits_per_check=(
                 WHATSAPP_VALIDATION_CREDITS if validate_whatsapp else None
             ),
+            n8n_execution_id=execution_id,
         )
 
-    async def _post(self, payload: dict[str, object], headers: dict[str, str]) -> None:
+    @staticmethod
+    def _execution_id_from(body: object) -> str | None:
+        """n8n's execution id, if the webhook's response carried one.
+
+        The default "Respond immediately" answer is `{"message": "Workflow was
+        started"}` and has no id. A workflow that answers through a "Respond to
+        Webhook" node can return `{"execution_id": "{{ $execution.id }}"}` (or
+        `executionId`, or n8n's own `{"execution": {"id": ...}}` shape) and the
+        run is tied to its execution from the first moment.
+        """
+        if not isinstance(body, dict):
+            return None
+
+        value = body.get("execution_id", body.get("executionId"))
+        if value is None and isinstance(body.get("execution"), dict):
+            value = body["execution"].get("id")
+
+        if value is None:
+            return None
+
+        text = str(value).strip()
+
+        return text[:64] or None
+
+    async def _post(
+        self, payload: dict[str, object], headers: dict[str, str]
+    ) -> str | None:
+        """POST the job to n8n. Returns the execution id when the response
+        carried one, None otherwise."""
         url = settings.N8N_WEBHOOK_URL
 
         try:
@@ -211,3 +244,10 @@ class LeadSearchService:
                 body=response.text[:500],
             )
             raise UpstreamError("The lead search workflow returned an error.")
+
+        try:
+            body = response.json()
+        except ValueError:
+            return None
+
+        return self._execution_id_from(body)

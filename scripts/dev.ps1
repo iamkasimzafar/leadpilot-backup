@@ -21,7 +21,11 @@ if (-not (Test-Path $python)) {
 Push-Location $root
 try {
     switch ($Task) {
-        'run' { & $python -m uvicorn app.main:app --reload }
+        # --timeout-graceful-shutdown: on a reload uvicorn waits for open
+        # connections to finish, and the SSE streams (notifications, search
+        # progress) never do. Without a limit one open browser tab leaves the
+        # server hung mid-reload, accepting nothing.
+        'run' { & $python -m uvicorn app.main:app --reload --timeout-graceful-shutdown 3 }
         'test' { & $python -m pytest @Rest }
         'lint' { & $python -m ruff check . --fix }
         'format' { & $python -m ruff format . }
