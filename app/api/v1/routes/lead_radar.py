@@ -14,18 +14,20 @@ from app.core.config import settings
 from app.core.exceptions import (
     InsufficientCreditsError,
     NotFoundError,
+    ServiceUnavailableError,
     UnauthorizedError,
     UpstreamError,
     ValidationError,
 )
 from app.core.logging import get_logger
 from app.core.security import decode_token
-from app.models.lead_search import STAGE_ORDER, RunStatus
+from app.models.lead_search import RunStatus, stage_order_for
 from app.repositories.lead import CompanyRepository
 from app.repositories.user import UserRepository
 from app.schemas.common import Message
 from app.schemas.lead import CompanyRead, SearchResultsRequest, SearchResultsResponse
 from app.schemas.lead_radar import (
+    CategoryList,
     ExpandKeywordRequest,
     ExpandKeywordResponse,
     ProgressCallbackRequest,
@@ -39,6 +41,7 @@ from app.schemas.lead_radar import (
     WorkflowErrorRequest,
     WorkflowErrorResponse,
 )
+from app.services import local_business
 from app.services.billing import BillingService
 from app.services.billing_catalog import AI_KEYWORD_EXPANSION_CREDITS
 from app.services.keyword_expansion import KeywordExpansionService
@@ -128,6 +131,47 @@ async def quote_search(
     )
 
 
+@router.get(
+    "/local/categories",
+    response_model=CategoryList,
+    summary="Search Google Business Profile categories",
+)
+async def search_local_categories(
+    _: CurrentUser,
+    q: str = Query("", max_length=80, description="What the user has typed so far."),
+    limit: int = Query(20, ge=1, le=50),
+) -> CategoryList:
+    """Type-ahead for the Local Offline Business category dropdown.
+
+    Served from the server because the full list is ~4,000 names: too many to
+    ship in the page bundle, trivial to search here. These are Google's own
+    category names, which is what the search's `subtypes` filter matches.
+    """
+    return CategoryList(
+        items=local_business.search(q, limit=limit), total=local_business.total()
+    )
+
+
+@router.get(
+    "/local/categories/related",
+    response_model=CategoryList,
+    summary="Categories related to a keyword or to the ones already picked",
+)
+async def related_local_categories(
+    _: CurrentUser,
+    keyword: str = Query("", max_length=120),
+    categories: list[str] = Query(default_factory=list, max_length=10),
+    limit: int = Query(12, ge=1, le=30),
+) -> CategoryList:
+    """One-click suggestions shown under the category field: type "dentist"
+    and get "Dental clinic", "Cosmetic dentist", ... Picking none of them is
+    fine -- the keyword alone is a complete local search."""
+    return CategoryList(
+        items=local_business.related(keyword, categories, limit=limit),
+        total=local_business.total(),
+    )
+
+
 @router.post(
     "/search",
     response_model=StartSearchResponse,
@@ -179,6 +223,13 @@ async def start_search(
         contact_role=payload.contact_role,
         company_size=payload.company_size,
         validate_whatsapp=payload.validate_whatsapp,
+        search_type=payload.search_type,
+        location=payload.location,
+        business_categories=payload.business_categories,
+        min_rating=payload.min_rating,
+        max_rating=payload.max_rating,
+        min_reviews=payload.min_reviews,
+        max_reviews=payload.max_reviews,
     )
 
     try:
@@ -194,8 +245,15 @@ async def start_search(
             contact_role=payload.contact_role,
             company_size=payload.company_size,
             validate_whatsapp=payload.validate_whatsapp,
+            search_type=payload.search_type,
+            location=payload.location,
+            business_categories=payload.business_categories,
+            min_rating=payload.min_rating,
+            max_rating=payload.max_rating,
+            min_reviews=payload.min_reviews,
+            max_reviews=payload.max_reviews,
         )
-    except UpstreamError as exc:
+    except (UpstreamError, ServiceUnavailableError) as exc:
         # The run exists but nothing is coming: close it so the UI does not sit
         # on a spinner forever. If even that fails, the original error is the
         # one worth surfacing; the sweeper will close the run later.
@@ -259,7 +317,8 @@ async def get_run(run_id: str, db: DbSession, current_user: CurrentUser) -> Sear
 
     payload = SearchRunRead.model_validate(run)
     payload.events = [SearchEventRead.model_validate(e) for e in events]
-    payload.stage_order = [stage.value for stage in STAGE_ORDER]
+    # A local search reports different checkpoints from a B2B one.
+    payload.stage_order = [stage.value for stage in stage_order_for(run.search_type)]
 
     # A workflow failure carries more than the message: attach the classified
     # reason and the node it died on, so the UI can advise rather than dump

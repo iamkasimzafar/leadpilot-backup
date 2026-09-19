@@ -68,6 +68,10 @@ REASONS: dict[str, bool] = {
     "unreachable": True,
     "bad_response": True,
     "no_valid_emails_found": True,
+    # Local Offline Business: Google Maps had no listing with a phone number
+    # inside the rating / review window. A wider area, a different keyword or
+    # a looser filter is the fix, so it is worth trying again differently.
+    "no_local_businesses_found": True,
     "unknown": True,
 }
 

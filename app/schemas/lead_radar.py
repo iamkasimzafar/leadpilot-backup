@@ -3,12 +3,19 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.common import BaseSchema
+from app.services import local_business
 from app.services.company_types import is_valid as is_valid_company_type
 from app.services.countries import is_valid
 from app.services.search_targeting import is_valid_role, is_valid_size
+
+SearchTypeLiteral = Literal["b2b", "local"]
+
+# More categories than this stops being a filter and becomes a second keyword
+# list; it also keeps the `subtypes` query string a sane length.
+MAX_BUSINESS_CATEGORIES = 10
 
 
 def _normalise_contact_role(value: str | None) -> str | None:
@@ -107,6 +114,88 @@ class StartSearchRequest(BaseModel):
     # because it is charged per number checked.
     validate_whatsapp: bool = False
 
+    # --- Local Offline Business search ---------------------------------
+    # "b2b" is the original company search and ignores everything below.
+    # "local" searches Google Maps listings in one area, through its own n8n
+    # workflow, and ignores the B2B-only filters (company type, contact role,
+    # company size).
+    search_type: SearchTypeLiteral = "b2b"
+
+    # The area to search, as the user typed it: a city, a neighbourhood, a
+    # postcode ("Brooklyn, New York"). Required for a local search.
+    location: str | None = Field(default=None, max_length=255)
+
+    # Google Business Profile categories to restrict the listings to. Empty is
+    # valid and common: the keyword alone is then the whole query.
+    business_categories: list[str] = Field(
+        default_factory=list, max_length=MAX_BUSINESS_CATEGORIES
+    )
+
+    # Google Maps rating window (1.0-5.0) and review-count window. Each bound
+    # is independent; None leaves that side open, all four None applies no
+    # filter. The API cannot filter on these, so the workflow does.
+    min_rating: float | None = Field(default=None, ge=1.0, le=5.0)
+    max_rating: float | None = Field(default=None, ge=1.0, le=5.0)
+    min_reviews: int | None = Field(default=None, ge=0, le=1_000_000)
+    max_reviews: int | None = Field(default=None, ge=0, le=1_000_000)
+
+    @field_validator("location")
+    @classmethod
+    def _tidy_location(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        return " ".join(value.split()) or None
+
+    @field_validator("business_categories")
+    @classmethod
+    def _known_categories(cls, value: list[str]) -> list[str]:
+        """Only Google's own category names: they are what the API's
+        `subtypes` filter matches, and an invented one would silently return
+        nothing. Returned in Google's spelling, duplicates dropped."""
+        known: list[str] = []
+        for raw in value:
+            name = local_business.canonical(raw)
+            if name is None:
+                raise ValueError(f"Unknown business category: {raw!r}.")
+            if name not in known:
+                known.append(name)
+
+        return known
+
+    @model_validator(mode="after")
+    def _coherent(self) -> "StartSearchRequest":
+        if self.search_type == "local":
+            if not self.location:
+                raise ValueError("A local search needs a location.")
+
+            # Not applicable to a Maps listing search; dropped rather than
+            # refused so the client need not clear fields it is not showing.
+            self.company_type = None
+            self.contact_role = None
+            self.company_size = None
+        else:
+            self.location = None
+            self.business_categories = []
+            self.min_rating = self.max_rating = None
+            self.min_reviews = self.max_reviews = None
+
+        if (
+            self.min_rating is not None
+            and self.max_rating is not None
+            and self.min_rating > self.max_rating
+        ):
+            raise ValueError("min_rating cannot be above max_rating.")
+
+        if (
+            self.min_reviews is not None
+            and self.max_reviews is not None
+            and self.min_reviews > self.max_reviews
+        ):
+            raise ValueError("min_reviews cannot be above max_reviews.")
+
+        return self
+
     @field_validator("company_type")
     @classmethod
     def _known_company_type(cls, value: str | None) -> str | None:
@@ -170,6 +259,22 @@ class StartSearchResponse(BaseModel):
     # to Webhook" node returning `{{ $execution.id }}`). Lets a later Error
     # Trigger report be tied to this run.
     n8n_execution_id: str | None = None
+    # Which workflow took the job, and the local-search scope it was given.
+    search_type: SearchTypeLiteral = "b2b"
+    location: str | None = None
+    business_categories: list[str] = Field(default_factory=list)
+    min_rating: float | None = None
+    max_rating: float | None = None
+    min_reviews: int | None = None
+    max_reviews: int | None = None
+
+
+class CategoryList(BaseModel):
+    """Google Business Profile categories, for the local-search dropdown."""
+
+    items: list[str]
+    # How many categories exist in all, so the UI can say what it is searching.
+    total: int
 
 
 # --- Pricing -----------------------------------------------------------------
@@ -246,6 +351,15 @@ class SearchRunRead(BaseSchema):
     company_size: str | None = None
     # Whether the run asked for WhatsApp validation.
     validate_whatsapp: bool = False
+    # "b2b" or "local", and for a local run the area, Google categories and
+    # rating / review window it was scoped to.
+    search_type: str = "b2b"
+    location: str | None = None
+    business_categories: list[str] = Field(default_factory=list)
+    min_rating: float | None = None
+    max_rating: float | None = None
+    min_reviews: int | None = None
+    max_reviews: int | None = None
     # Settlement, once the results arrived successfully. Zero and null until
     # then; nothing is charged for a failed run.
     credits_charged: int = 0

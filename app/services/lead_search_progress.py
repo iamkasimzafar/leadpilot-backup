@@ -14,11 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.logging import get_logger
 from app.models.lead_search import (
-    STAGE_ORDER,
     LeadSearchEvent,
     LeadSearchRun,
     RunStatus,
     SearchStage,
+    SearchType,
+    stage_order_for,
 )
 from app.models.notification import NotificationKind
 from app.repositories.lead_search import (
@@ -39,13 +40,16 @@ _COUNT_FIELD: dict[SearchStage, str] = {
     SearchStage.FINDING_DECISION_MAKERS: "contacts_found",
     SearchStage.FINDING_EMAILS: "contacts_found",
     SearchStage.VERIFYING_CONTACTS: "contacts_found",
+    # Local searches: listings left after the rating / review window.
+    SearchStage.FILTERING_RESULTS: "companies_found",
 }
 
 
-def _stage_index(stage: str) -> int:
-    """Position in the displayed checkpoint list, or -1 for queued/completed."""
+def _stage_index(stage: str, search_type: str | None = None) -> int:
+    """Position in the checkpoint list for this kind of run, or -1 for
+    queued/completed (and for a stage that kind of run does not have)."""
     try:
-        return STAGE_ORDER.index(SearchStage(stage))
+        return stage_order_for(search_type).index(SearchStage(stage))
     except ValueError:
         return -1
 
@@ -70,11 +74,29 @@ class LeadSearchProgressService(BaseService):
         contact_role: str | None = None,
         company_size: str | None = None,
         validate_whatsapp: bool = False,
+        search_type: str = SearchType.B2B.value,
+        location: str | None = None,
+        business_categories: list[str] | None = None,
+        min_rating: float | None = None,
+        max_rating: float | None = None,
+        min_reviews: int | None = None,
+        max_reviews: int | None = None,
     ) -> LeadSearchRun:
         """Open a run, ready to be dispatched to n8n. Commits immediately so the
         row exists before the workflow can call back."""
         run = await self.runs.create(
             user_id=user_id,
+            search_type=search_type,
+            location=location,
+            business_categories_json=(
+                json.dumps(business_categories, ensure_ascii=False)
+                if business_categories
+                else None
+            ),
+            min_rating=min_rating,
+            max_rating=max_rating,
+            min_reviews=min_reviews,
+            max_reviews=max_reviews,
             original_keyword=original_keyword,
             keywords_json=json.dumps(keywords),
             keyword_count=len(keywords),
@@ -89,7 +111,12 @@ class LeadSearchProgressService(BaseService):
         )
         await self.commit()
 
-        log.info("lead_search.run_created", run_id=run.id, user_id=user_id)
+        log.info(
+            "lead_search.run_created",
+            run_id=run.id,
+            user_id=user_id,
+            search_type=search_type,
+        )
 
         return run
 
@@ -183,9 +210,11 @@ class LeadSearchProgressService(BaseService):
         # On a finishing call the conditional UPDATE below owns `stage`. Setting
         # it here too would let a losing concurrent request flush its stale
         # "verifying_contacts" over the winner's "completed".
-        if not (completing or error) and _stage_index(reported.value) >= _stage_index(
-            run.stage
-        ):
+        # Judged against this run's own checkpoint list: a local search and a
+        # B2B search report different stages, in different orders.
+        if not (completing or error) and _stage_index(
+            reported.value, run.search_type
+        ) >= _stage_index(run.stage, run.search_type):
             run.stage = reported.value
 
         if count is not None:

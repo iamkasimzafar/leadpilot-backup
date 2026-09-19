@@ -73,9 +73,18 @@ class LeadSearchService:
         contact_role: str | None = None,
         company_size: str | None = None,
         validate_whatsapp: bool = False,
+        search_type: str = "b2b",
+        location: str | None = None,
+        business_categories: list[str] | None = None,
+        min_rating: float | None = None,
+        max_rating: float | None = None,
+        min_reviews: int | None = None,
+        max_reviews: int | None = None,
     ) -> StartSearchResponse:
         original = " ".join(original_keyword.split())
         keywords = _merge_keywords(original, expanded_keywords)
+        is_local = search_type == "local"
+        categories = list(business_categories or [])
 
         # Resolved here so the workflow gets a usable label without a lookup of
         # its own. None stays None: the workflow reads that as "worldwide".
@@ -89,9 +98,20 @@ class LeadSearchService:
         size_name = size_name_for(company_size) if company_size else None
         size_bounds = size_bounds_for(company_size) if company_size else None
 
-        if not settings.N8N_WEBHOOK_URL:
-            log.warning("lead_search.disabled", reason="N8N_WEBHOOK_URL not set")
-            raise ServiceUnavailableError("Lead search is not configured on this server.")
+        # The two kinds of search are two separate n8n workflows, each behind
+        # its own webhook, so one can be configured (or down) without the other.
+        webhook_url = (
+            settings.N8N_LOCAL_WEBHOOK_URL if is_local else settings.N8N_WEBHOOK_URL
+        )
+
+        if not webhook_url:
+            missing = "N8N_LOCAL_WEBHOOK_URL" if is_local else "N8N_WEBHOOK_URL"
+            log.warning("lead_search.disabled", reason=f"{missing} not set")
+            raise ServiceUnavailableError(
+                "Local business search is not configured on this server."
+                if is_local
+                else "Lead search is not configured on this server."
+            )
 
         # The exact shape the n8n workflow expects. Extra context goes after the
         # two required keys so the workflow can ignore it safely.
@@ -143,13 +163,30 @@ class LeadSearchService:
             # X-LeadPilot-Run-Id (or in the body).
             "results_url": f"{base}{settings.API_V1_PREFIX}/lead-radar/results",
             "progress_token": callback_token,
+            # "b2b" or "local". Present on both so a workflow can assert it
+            # received the kind of job it was built for.
+            "search_type": search_type,
         }
+
+        if is_local:
+            payload.update(
+                self._local_payload(
+                    keywords,
+                    location=location or "",
+                    country=country,
+                    categories=categories,
+                    min_rating=min_rating,
+                    max_rating=max_rating,
+                    min_reviews=min_reviews,
+                    max_reviews=max_reviews,
+                )
+            )
 
         headers = {}
         if settings.N8N_WEBHOOK_SECRET:
             headers[settings.N8N_WEBHOOK_HEADER] = settings.N8N_WEBHOOK_SECRET
 
-        execution_id = await self._post(payload, headers)
+        execution_id = await self._post(webhook_url, payload, headers)
 
         log.info(
             "lead_search.dispatched",
@@ -181,7 +218,76 @@ class LeadSearchService:
                 WHATSAPP_VALIDATION_CREDITS if validate_whatsapp else None
             ),
             n8n_execution_id=execution_id,
+            search_type="local" if is_local else "b2b",
+            location=location if is_local else None,
+            business_categories=categories if is_local else [],
+            min_rating=min_rating if is_local else None,
+            max_rating=max_rating if is_local else None,
+            min_reviews=min_reviews if is_local else None,
+            max_reviews=max_reviews if is_local else None,
         )
+
+    @staticmethod
+    def _local_payload(
+        keywords: list[str],
+        *,
+        location: str,
+        country: str | None,
+        categories: list[str],
+        min_rating: float | None,
+        max_rating: float | None,
+        min_reviews: int | None,
+        max_reviews: int | None,
+    ) -> dict[str, object]:
+        """The extra keys a Local Offline Business job carries.
+
+        `local_search` is shaped as the query string of the Local Business
+        Data API's Search endpoint (GET /search on
+        local-business-data.p.rapidapi.com), so the workflow's HTTP Request
+        node can map it across field for field: one request per entry in
+        `queries`, everything else constant.
+
+        That API has no rating or review-count parameter, so `filters` is NOT
+        part of the request: the workflow applies it to the listings that come
+        back (their `rating` and `review_count` fields). A null bound is open;
+        `enabled` is false when all four are null, so the workflow can skip
+        the filter node altogether.
+        """
+        # "dentist in Brooklyn, New York": the form Google Maps itself
+        # resolves best, and it needs no geocoding step for lat/lng.
+        queries = [f"{keyword} in {location}" for keyword in keywords]
+
+        return {
+            "location": location,
+            "business_categories": categories,
+            "local_search": {
+                "query": queries[0],
+                "queries": queries,
+                "limit": settings.LOCAL_SEARCH_RESULT_LIMIT,
+                # Google category names, comma-separated, or null for no
+                # category restriction.
+                "subtypes": ",".join(categories) if categories else None,
+                # Two-letter country code; biases how the area name resolves
+                # ("Springfield"). Null lets the API use its default.
+                "region": country,
+                "language": "en",
+                "business_status": "OPEN",
+                # Scrapes each listing's website for emails and socials. Slower
+                # and billed higher upstream, but it is what makes a listing a
+                # contactable lead.
+                "extract_emails_and_contacts": True,
+            },
+            "filters": {
+                "enabled": any(
+                    bound is not None
+                    for bound in (min_rating, max_rating, min_reviews, max_reviews)
+                ),
+                "min_rating": min_rating,
+                "max_rating": max_rating,
+                "min_reviews": min_reviews,
+                "max_reviews": max_reviews,
+            },
+        }
 
     @staticmethod
     def _execution_id_from(body: object) -> str | None:
@@ -208,12 +314,10 @@ class LeadSearchService:
         return text[:64] or None
 
     async def _post(
-        self, payload: dict[str, object], headers: dict[str, str]
+        self, url: str, payload: dict[str, object], headers: dict[str, str]
     ) -> str | None:
         """POST the job to n8n. Returns the execution id when the response
         carried one, None otherwise."""
-        url = settings.N8N_WEBHOOK_URL
-
         try:
             if self._client is not None:
                 response = await self._client.post(url, json=payload, headers=headers)

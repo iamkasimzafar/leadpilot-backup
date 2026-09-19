@@ -6,12 +6,23 @@ LeadSearchEvent; the run's own `stage`/`status` hold the latest position so the
 UI can render without replaying the event list.
 """
 
+import json
 import secrets
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base, TimestampMixin
@@ -49,7 +60,19 @@ class SearchStage(StrEnum):
     FINDING_DECISION_MAKERS = "finding_decision_makers"
     FINDING_EMAILS = "finding_emails"
     VERIFYING_CONTACTS = "verifying_contacts"
+    # Local Offline Business searches only: applying the rating / review-count
+    # window to what Google Maps returned.
+    FILTERING_RESULTS = "filtering_results"
     COMPLETED = "completed"
+
+
+class SearchType(StrEnum):
+    """Which workflow a run is handled by."""
+
+    # The original search: companies on the web, then their decision makers.
+    B2B = "b2b"
+    # Local Offline Business: Google Maps listings in one area.
+    LOCAL = "local"
 
 
 # Display order for the progress tracker. `queued` is implicit (the run starts
@@ -63,6 +86,20 @@ STAGE_ORDER: tuple[SearchStage, ...] = (
     SearchStage.FINDING_EMAILS,
     SearchStage.VERIFYING_CONTACTS,
 )
+
+# A local search has no AI qualification, domain lookup or decision-maker
+# discovery: it finds listings, filters them, then enriches their contacts.
+LOCAL_STAGE_ORDER: tuple[SearchStage, ...] = (
+    SearchStage.SEARCHING_COMPANIES,
+    SearchStage.FILTERING_RESULTS,
+    SearchStage.FINDING_EMAILS,
+    SearchStage.VERIFYING_CONTACTS,
+)
+
+
+def stage_order_for(search_type: str | None) -> tuple[SearchStage, ...]:
+    """The checkpoints a run of this kind reports, in order."""
+    return LOCAL_STAGE_ORDER if search_type == SearchType.LOCAL.value else STAGE_ORDER
 
 
 class RunStatus(StrEnum):
@@ -96,6 +133,23 @@ class LeadSearchRun(Base, TimestampMixin):
     n8n_execution_id: Mapped[str | None] = mapped_column(
         String(64), index=True, nullable=True
     )
+
+    # Which workflow handles the run: "b2b" or "local" (see SearchType).
+    search_type: Mapped[str] = mapped_column(
+        String(16), default=SearchType.B2B.value, server_default="b2b", nullable=False
+    )
+
+    # Local searches only. `location` is the area as the user typed it
+    # ("Brooklyn, New York"); the categories are Google Business Profile
+    # category names (JSON list), empty when the keyword alone drives the
+    # search; the rating / review bounds are the Google Maps window to keep,
+    # NULL meaning that side is open.
+    location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    business_categories_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    min_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_reviews: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_reviews: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     original_keyword: Mapped[str] = mapped_column(String(255), nullable=False)
     # JSON-encoded list. A plain text column rather than JSON: portable across
@@ -178,6 +232,19 @@ class LeadSearchRun(Base, TimestampMixin):
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    @property
+    def business_categories(self) -> list[str]:
+        """The Google categories a local run was filtered to; [] otherwise."""
+        if not self.business_categories_json:
+            return []
+
+        try:
+            value = json.loads(self.business_categories_json)
+        except ValueError:
+            return []
+
+        return [str(item) for item in value] if isinstance(value, list) else []
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<LeadSearchRun {self.id} {self.status}/{self.stage}>"

@@ -89,6 +89,13 @@ class Settings(BaseSettings):
     # "Execute workflow" click) and /webhook/ once the workflow is activated.
     # Empty disables dispatch: the endpoint then answers 503.
     N8N_WEBHOOK_URL: str = ""
+    # Webhook of the SEPARATE workflow that handles Local Offline Business
+    # searches (Google Maps data via the Local Business Data API). Empty
+    # disables that search type only: the B2B search keeps working.
+    N8N_LOCAL_WEBHOOK_URL: str = ""
+    # How many listings the local workflow asks the API for, per query. The
+    # API bills per result, so this caps what one search can cost upstream.
+    LOCAL_SEARCH_RESULT_LIMIT: int = 60
     # Optional shared secret, sent as a header when set. Configure the matching
     # header auth on the n8n Webhook node so the endpoint is not wide open.
     N8N_WEBHOOK_SECRET: str = ""

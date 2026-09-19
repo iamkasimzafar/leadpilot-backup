@@ -1,0 +1,1243 @@
+{
+  "name": "LeadPilot - Local Offline Business",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "local-search-V1",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -400,
+        0
+      ],
+      "id": "20e0eff8-89ae-4c1e-aedd-6d2acf025d04",
+      "name": "Webhook",
+      "webhookId": "b1c5bc7c-5e6f-406f-a92f-f95c7dbecae0"
+    },
+    {
+      "parameters": {
+        "jsCode": "// One item per Google Maps query. The backend already built the queries\n// (\"dentist in Brooklyn, New York\") and the API parameters; this node only\n// drops the empty ones so they are not sent as blank strings.\nconst MAX_QUERIES = 5; // each query is a billed API call\n\nconst hook = $input.first().json;\nconst body = hook.body || hook;\nconst search = body.local_search || {};\n\nif (body.search_type && body.search_type !== 'local') {\n  throw new Error(`LeadPilot Error: this workflow handles local searches, got \"${body.search_type}\".`);\n}\n\nconst queries = (Array.isArray(search.queries) && search.queries.length ? search.queries : [search.query])\n  .filter(q => typeof q === 'string' && q.trim())\n  .slice(0, MAX_QUERIES);\n\nif (!queries.length) {\n  throw new Error('LeadPilot Error: the job carried no local_search query.');\n}\n\nconst base = {\n  limit: search.limit || 20,\n  region: search.region,\n  language: search.language || 'en',\n  business_status: search.business_status || 'OPEN',\n  subtypes: search.subtypes,\n  extract_emails_and_contacts: search.extract_emails_and_contacts === true ? 'true' : undefined,\n};\n\nreturn queries.map(query => {\n  const params = { query, ...base };\n  for (const key of Object.keys(params)) {\n    if (params[key] === null || params[key] === undefined || params[key] === '') delete params[key];\n  }\n  return { json: { query, params } };\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        0
+      ],
+      "id": "d79f6b2f-9f3d-4fa4-b3c2-c1cc38d88eef",
+      "name": "Prepare Queries"
+    },
+    {
+      "parameters": {
+        "url": "https://local-business-data.p.rapidapi.com/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "specifyQuery": "json",
+        "jsonQuery": "={{ JSON.stringify($json.params) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-RapidAPI-Host",
+              "value": "local-business-data.p.rapidapi.com"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1000
+            }
+          },
+          "timeout": 120000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        80,
+        0
+      ],
+      "id": "38b10cd5-2d3a-416c-92f3-e820e3277004",
+      "name": "Search Google Maps",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL",
+          "name": "RapidAPI Key"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Webhook').first().json.body.progress_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-LeadPilot-Run-Token",
+              "value": "={{ $('Webhook').first().json.body.progress_token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ stage: 'searching_companies', message: 'Searching Google Maps for local businesses', count: $input.all().reduce((n, i) => n + (Array.isArray(i.json.data) ? i.json.data.length : 0), 0), execution_id: $execution.id }) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        320,
+        -260
+      ],
+      "id": "abd6c598-46d1-4b4f-a2a7-9ccb0a0d935f",
+      "name": "Searching Companies",
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turns the raw Google Maps listings into leads:\n//   1. de-duplicate across queries\n//   2. apply the user's rating / review window (only when they set one)\n//   3. keep ONLY listings with a phone number -- that is what makes a lead\n// A website is a bonus: those listings are enriched further down.\nconst MAX_LEADS = 100;\n\nconst hook = $('Webhook').first().json;\nconst body = hook.body || hook;\nconst filters = body.filters || {};\n\nconst num = v => (v === null || v === undefined || v === '' || isNaN(Number(v)) ? null : Number(v));\nconst minRating = num(filters.min_rating);\nconst maxRating = num(filters.max_rating);\nconst minReviews = num(filters.min_reviews);\nconst maxReviews = num(filters.max_reviews);\nconst ratingOn = minRating !== null || maxRating !== null;\nconst reviewsOn = minReviews !== null || maxReviews !== null;\n\n// Optional: better phone normalisation when the library is allowed on this instance.\nlet parsePhone = null;\ntry {\n  const lib = require('libphonenumber-js');\n  parsePhone = lib.parsePhoneNumberFromString || (lib.default && lib.default.parsePhoneNumberFromString) || null;\n} catch (e) {}\n\nfunction cleanPhone(raw, country) {\n  if (!raw) return null;\n  const text = String(raw).trim();\n  if (parsePhone) {\n    try {\n      const parsed = parsePhone(text, (country || 'US').toUpperCase());\n      if (parsed && parsed.isValid()) return parsed.number.replace('+', '');\n    } catch (e) {}\n  }\n  let digits = text.replace(/[^0-9]/g, '');\n  if (!text.startsWith('+') && digits.length === 10 && ['US', 'CA', ''].includes((country || '').toUpperCase())) {\n    digits = '1' + digits;\n  }\n  return digits.length >= 7 ? digits : null;\n}\n\n// A \"website\" on one of these hosts is a profile page, not a company domain:\n// worth keeping as a link, useless for decision-maker lookup.\nconst NOT_A_COMPANY_DOMAIN = [\n  'facebook.com', 'instagram.com', 'twitter.com', 'x.com', 'linkedin.com', 'tiktok.com', 'youtube.com',\n  'yelp.com', 'google.com', 'goo.gl', 'linktr.ee', 'wa.me', 'whatsapp.com', 'booking.com', 'tripadvisor.com',\n  'business.site', 'wixsite.com', 'wordpress.com', 'blogspot.com', 'square.site', 'godaddysites.com',\n  'doordash.com', 'ubereats.com', 'grubhub.com', 'opentable.com', 'yellowpages.com', 'foursquare.com',\n];\n\nfunction domainOf(url) {\n  if (!url) return '';\n  return String(url).replace(/^https?:\\/\\//i, '').replace(/^www\\./i, '').split(/[/?#]/)[0].toLowerCase();\n}\n\nlet raw = [];\nfor (const item of $input.all()) {\n  if (Array.isArray(item.json.data)) raw = raw.concat(item.json.data);\n}\n\nconst seenIds = new Set();\nconst seenPhones = new Set();\nconst leads = [];\nlet afterWindow = 0;\n\nfor (const b of raw) {\n  const id = b.business_id || b.place_id || b.google_id || `${b.name}|${b.full_address}`;\n  if (seenIds.has(id)) continue;\n  seenIds.add(id);\n\n  const rating = num(b.rating);\n  const reviews = num(b.review_count) || 0;\n\n  if (ratingOn) {\n    if (rating === null) continue; // unrated cannot satisfy a rating window\n    if (minRating !== null && rating < minRating) continue;\n    if (maxRating !== null && rating > maxRating) continue;\n  }\n  if (reviewsOn) {\n    if (minReviews !== null && reviews < minReviews) continue;\n    if (maxReviews !== null && reviews > maxReviews) continue;\n  }\n  afterWindow++;\n\n  const phone = b.phone_number || (b.emails_and_contacts && (b.emails_and_contacts.phone_numbers || [])[0]) || '';\n  const clean = cleanPhone(phone, b.country);\n  if (!clean) continue; // no phone, no lead\n  if (seenPhones.has(clean)) continue; // same line listed twice (branches, duplicates)\n  seenPhones.add(clean);\n\n  const contacts = b.emails_and_contacts || {};\n  const emails = (Array.isArray(contacts.emails) ? contacts.emails : [])\n    .filter(e => typeof e === 'string' && e.includes('@'))\n    .slice(0, 5);\n  const socials = {};\n  for (const key of ['facebook', 'instagram', 'linkedin', 'twitter', 'youtube', 'tiktok', 'yelp']) {\n    if (contacts[key]) socials[key] = contacts[key];\n  }\n\n  const domain = domainOf(b.website);\n  const enrichable = Boolean(domain) && !NOT_A_COMPANY_DOMAIN.some(d => domain === d || domain.endsWith('.' + d));\n\n  leads.push({\n    business_id: id,\n    name: b.name || 'Unnamed business',\n    phone: String(phone).trim(),\n    clean_phone: clean,\n    website: b.website || null,\n    domain: enrichable ? domain : '',\n    enrichable,\n    full_address: b.full_address || b.address || null,\n    city: b.city || null,\n    state: b.state || null,\n    country: b.country || null,\n    type: b.type || (Array.isArray(b.subtypes) ? b.subtypes[0] : null) || null,\n    subtypes: Array.isArray(b.subtypes) ? b.subtypes : [],\n    rating,\n    review_count: reviews,\n    place_link: b.place_link || null,\n    verified: b.verified === true,\n    latitude: b.latitude ?? null,\n    longitude: b.longitude ?? null,\n    emails,\n    socials,\n  });\n}\n\n// Website first (the \"plus point\"), then the better-reviewed.\nleads.sort((a, b) => Number(Boolean(b.website)) - Number(Boolean(a.website)) || b.review_count - a.review_count);\nconst kept = leads.slice(0, MAX_LEADS);\n\nconst stats = { raw_count: raw.length, after_window: afterWindow, lead_count: kept.length };\n\nif (!kept.length) {\n  // Code nodes that return nothing stop the workflow silently; hand the IF\n  // node something to route to the failure report instead.\n  return [{ json: { _no_leads: true, ...stats } }];\n}\n\nreturn kept.map(lead => ({ json: { ...lead, ...stats } }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        320,
+        0
+      ],
+      "id": "720a78f3-cc28-4421-b22e-72ffe07f5538",
+      "name": "Filter & Keep Phone Leads"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "9872f4c4-29c9-4da0-952e-0bcc972203c5",
+              "leftValue": "={{ $json._no_leads !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        560,
+        0
+      ],
+      "id": "00e9d8d8-51e1-4d35-9ca1-994233b1b049",
+      "name": "Any Leads?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Webhook').first().json.body.progress_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-LeadPilot-Run-Token",
+              "value": "={{ $('Webhook').first().json.body.progress_token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ stage: 'filtering_results', message: `${$input.first().json.lead_count} of ${$input.first().json.raw_count} listings kept (phone number required)`, count: $input.all().length, execution_id: $execution.id }) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        800,
+        -260
+      ],
+      "id": "efaeed45-7e81-416f-9797-9bd7b90b3d3a",
+      "name": "Filtering Results",
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Webhook').first().json.body.results_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-LeadPilot-Run-Token",
+              "value": "={{ $('Webhook').first().json.body.progress_token }}"
+            },
+            {
+              "name": "X-LeadPilot-Run-Id",
+              "value": "={{ $('Webhook').first().json.body.run_id }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ status: 'failed', reason: 'no_local_businesses_found', message: `No local business with a phone number matched this search (${$json.raw_count} listings found, ${$json.after_window} inside the rating / review filter).` }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        800,
+        300
+      ],
+      "id": "2bff29db-501c-4c92-942b-5f3db6c87289",
+      "name": "Report No Leads",
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Which leads are worth a Snov.io lookup: a real company domain, once each.\n// Capped, because every domain costs Snov.io credits and ~30s of waiting.\nconst MAX_ENRICH = 20;\n\nconst seen = new Set();\nconst out = [];\nfor (const item of $input.all()) {\n  const lead = item.json;\n  if (!lead.enrichable || !lead.domain || seen.has(lead.domain)) continue;\n  seen.add(lead.domain);\n  out.push({ json: { domain: lead.domain, business_id: lead.business_id, name: lead.name } });\n  if (out.length >= MAX_ENRICH) break;\n}\n\nreturn out.length ? out : [{ json: { _none: true } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        0
+      ],
+      "id": "697a742a-0ff4-4feb-96a7-c9eb66af0457",
+      "name": "Pick Websites To Enrich"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "4b43d0ff-046c-422c-9a09-bd556922a0f9",
+              "leftValue": "={{ $json._none !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1040,
+        0
+      ],
+      "id": "2b9d5415-cd60-4da6-a474-4ff907ca6fd7",
+      "name": "Has Websites?"
+    },
+    {
+      "parameters": {
+        "operation": "startProspectProfiles",
+        "domain": "={{ $json.domain }}",
+        "positions": "owner,founder,ceo,president,director,manager,partner"
+      },
+      "type": "n8n-nodes-snovio.snovioApi",
+      "typeVersion": 1,
+      "position": [
+        1280,
+        -120
+      ],
+      "id": "0f557827-f053-445e-89fb-33c1efef5de7",
+      "name": "Start prospect profiles",
+      "credentials": {
+        "snovioApi": {
+          "id": "uqvwWpTnbjCZIPv3",
+          "name": "Snov.io account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "amount": 10
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1500,
+        -120
+      ],
+      "id": "b6c06c60-96a6-4410-a231-194ade95b856",
+      "name": "Wait1",
+      "webhookId": "d6dc17f7-7d85-4edc-83dc-c01973b772eb"
+    },
+    {
+      "parameters": {
+        "operation": "getProspectProfilesResult",
+        "task_hash": "={{ $('Start prospect profiles').item.json.meta.task_hash }}"
+      },
+      "type": "n8n-nodes-snovio.snovioApi",
+      "typeVersion": 1,
+      "position": [
+        1720,
+        -120
+      ],
+      "id": "bf5097e7-32cc-422e-b921-cb117be84e92",
+      "name": "Get prospect profiles result",
+      "credentials": {
+        "snovioApi": {
+          "id": "uqvwWpTnbjCZIPv3",
+          "name": "Snov.io account"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Same idea as the B2B \"Filter & Limit Prospects\", with two differences:\n//  * it never throws -- a local lead is already complete with its phone, so\n//    finding no decision maker must not fail the search;\n//  * a small business rarely lists a \"procurement\" title, so owners and\n//    managers lead, and if no title matches the first people found are kept.\nconst MAX_PER_COMPANY = 3;\nconst MAX_TOTAL = 60;\n\nconst roles = ['owner', 'founder', 'ceo', 'president', 'proprietor', 'principal', 'partner', 'director',\n  'managing', 'manager', 'head', 'chief', 'vp', 'vice president'];\n\nlet total = 0;\nconst out = [];\n\nfor (const item of $input.all()) {\n  if (total >= MAX_TOTAL) break;\n\n  const people = Array.isArray(item.json.data) ? item.json.data\n    : Array.isArray(item.json.prospects) ? item.json.prospects : [];\n  if (!people.length) continue;\n\n  const domain = (item.json.meta && item.json.meta.domain) || '';\n  const withEmailLink = people.filter(p => p && p.search_emails_start);\n  const matched = withEmailLink.filter(p => {\n    const title = String(p.position || p.title || p.job_title || '').toLowerCase();\n    return roles.some(role => title.includes(role));\n  });\n\n  const chosen = (matched.length ? matched : withEmailLink).slice(0, Math.min(MAX_PER_COMPANY, MAX_TOTAL - total));\n  if (!chosen.length) continue;\n\n  total += chosen.length;\n  out.push({ json: { ...item.json, data: chosen.map(p => ({ ...p, lp_domain: domain })) } });\n}\n\nreturn out.length ? out : [{ json: { _none: true } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1940,
+        -120
+      ],
+      "id": "f61381db-5c24-473a-906d-83292b2cb20c",
+      "name": "Limit Prospects"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "a43e3f09-e1cc-41de-b331-34863bd5bb36",
+              "leftValue": "={{ $json._none !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2160,
+        -120
+      ],
+      "id": "428e33a3-4d91-46a7-a6c8-7deb81abddbe",
+      "name": "Any Prospects?"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        2400,
+        -240
+      ],
+      "id": "230c6ee2-1dde-40d3-af3b-0b645b48bc23",
+      "name": "Split Out1"
+    },
+    {
+      "parameters": {
+        "operation": "startProspectsEmails",
+        "prospect_hash": "={{ $json.search_emails_start.split('/').pop() }}"
+      },
+      "type": "n8n-nodes-snovio.snovioApi",
+      "typeVersion": 1,
+      "position": [
+        2620,
+        -240
+      ],
+      "id": "cf1fe8e7-9a5a-49df-8a22-b1aedebd6105",
+      "name": "Start prospects emails",
+      "credentials": {
+        "snovioApi": {
+          "id": "uqvwWpTnbjCZIPv3",
+          "name": "Snov.io account"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "amount": 10
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2840,
+        -240
+      ],
+      "id": "dbe9fd3e-79e9-4498-b93b-45935388a378",
+      "name": "Wait2",
+      "webhookId": "c499e5f2-f1a5-45e2-bf7b-286e5fddca84"
+    },
+    {
+      "parameters": {
+        "operation": "getProspectEmailSearchResult",
+        "task_hash": "={{ $('Start prospects emails').item.json.meta.task_hash }}"
+      },
+      "type": "n8n-nodes-snovio.snovioApi",
+      "typeVersion": 1,
+      "position": [
+        3060,
+        -240
+      ],
+      "id": "969ceae2-d4ea-4e85-a069-dd6087fcd296",
+      "name": "Get prospect email search result",
+      "credentials": {
+        "snovioApi": {
+          "id": "uqvwWpTnbjCZIPv3",
+          "name": "Snov.io account"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "f7161ee0-7b98-4bd0-972c-ea121726b0c9",
+                    "leftValue": "={{ !$json.data || Array.isArray($json.data) || !$json.data.emails || $json.data.emails.length === 0 ? 'no_email' : ($json.data.emails[0].smtp_status || 'unknown') }}",
+                    "rightValue": "valid",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "valid"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "94cc00fc-da6a-4aef-a073-2c641ac2e0d7",
+                    "leftValue": "={{ !$json.data || Array.isArray($json.data) || !$json.data.emails || $json.data.emails.length === 0 ? 'no_email' : ($json.data.emails[0].smtp_status || 'unknown') }}",
+                    "rightValue": "unknown",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "unknown"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "no_email"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        3280,
+        -240
+      ],
+      "id": "dfd6b6f4-af9c-4478-bd49-2e3b5bda88b3",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "resource": "emailVerifier",
+        "emails": "={{ $json.data.emails[0].email }}"
+      },
+      "type": "n8n-nodes-snovio.snovioApi",
+      "typeVersion": 1,
+      "position": [
+        3520,
+        -120
+      ],
+      "id": "19e46b52-aeea-490c-b68f-46a397d8752c",
+      "name": "Start email verification",
+      "credentials": {
+        "snovioApi": {
+          "id": "uqvwWpTnbjCZIPv3",
+          "name": "Snov.io account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "amount": 8
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        3740,
+        -120
+      ],
+      "id": "3595392d-6239-4452-8ece-8866adc19cbf",
+      "name": "Wait3",
+      "webhookId": "2017d0c9-0b45-4a48-b0f7-7cd59de1fe3a"
+    },
+    {
+      "parameters": {
+        "resource": "emailVerifier",
+        "operation": "getEmailVerificationResult",
+        "task_hash": "={{ $('Start email verification').item.json.data.task_hash }}"
+      },
+      "type": "n8n-nodes-snovio.snovioApi",
+      "typeVersion": 1,
+      "position": [
+        3960,
+        -120
+      ],
+      "id": "a1019499-8a9e-49cd-ad50-41b43e86c7dd",
+      "name": "Get email verification result",
+      "credentials": {
+        "snovioApi": {
+          "id": "uqvwWpTnbjCZIPv3",
+          "name": "Snov.io account"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "append"
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        4200,
+        -240
+      ],
+      "id": "c23599fb-a826-4e74-a06e-aadd2839ff1a",
+      "name": "Collect Emails",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "mode": "append"
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        4440,
+        0
+      ],
+      "id": "c87eba8a-9189-4ea2-9ca3-df6b99d25887",
+      "name": "Enrichment Done",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// One item per distinct phone number: what the WhatsApp check runs on, so a\n// number shared by two listings is only paid for once.\nconst leads = $('Filter & Keep Phone Leads').all().map(i => i.json);\n\nlet snovEmails = 0;\ntry {\n  for (const item of $('Collect Emails').all()) {\n    const d = item.json.data;\n    if (Array.isArray(d)) {\n      if (d[0] && d[0].email) snovEmails++;\n    } else if (d && Array.isArray(d.emails) && d.emails[0] && d.emails[0].smtp_status === 'valid') {\n      snovEmails++;\n    }\n  }\n} catch (e) {}\n\nconst siteEmails = leads.reduce((n, lead) => n + (lead.emails || []).length, 0);\nconst contactCount = snovEmails + siteEmails;\n\nconst seen = new Set();\nconst out = [];\nfor (const lead of leads) {\n  if (!lead.clean_phone || seen.has(lead.clean_phone)) continue;\n  seen.add(lead.clean_phone);\n  out.push({ json: { clean_phone: lead.clean_phone, contact_count: contactCount } });\n}\n\nreturn out;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4680,
+        0
+      ],
+      "id": "8fe1f5c6-809f-45f8-bbec-2592905df9e2",
+      "name": "Unique Phones"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Webhook').first().json.body.progress_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-LeadPilot-Run-Token",
+              "value": "={{ $('Webhook').first().json.body.progress_token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ stage: 'finding_emails', message: 'Collected emails and decision makers from business websites', count: ($input.first().json.contact_count || 0), execution_id: $execution.id }) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        4920,
+        -260
+      ],
+      "id": "188a6a01-6f7e-4fff-87e5-516c046cb051",
+      "name": "Finding Emails",
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "c9aef4a4-5187-4943-afac-dc91e5cd3c6e",
+              "leftValue": "={{ $('Webhook').first().json.body.validate_whatsapp === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        4920,
+        0
+      ],
+      "id": "9325d2c3-ae52-4d3b-bf90-d46f77d0ed9e",
+      "name": "Validate WhatsApp?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://whatsapp-number-validator3.p.rapidapi.com/WhatsappNumberHasItBulkWithToken",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-RapidAPI-Host",
+              "value": "whatsapp-number-validator3.p.rapidapi.com"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ phone_numbers: [$json.clean_phone] }) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1500
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        5160,
+        -120
+      ],
+      "id": "fa3d6cf5-edac-4a3d-a7d5-a280c57ea241",
+      "name": "WhatsApp Validator",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL",
+          "name": "RapidAPI Key"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Assembles the results the backend expects: one company per Google Maps\n// lead, with its contacts. Reads the earlier nodes by name, each inside a\n// try/catch, because on a run with no websites (or no WhatsApp check) those\n// nodes never executed.\nconst hook = $('Webhook').first().json;\nconst body = hook.body || hook;\nconst whatsappOn = body.validate_whatsapp === true;\n\nconst leads = $('Filter & Keep Phone Leads').all().map(i => i.json).filter(l => !l._no_leads);\n\nconst last10 = phone => {\n  const digits = String(phone || '').replace(/[^0-9]/g, '');\n  return digits.length >= 10 ? digits.slice(-10) : digits;\n};\nconst domainOf = email => (String(email || '').includes('@') ? String(email).split('@')[1].toLowerCase() : '');\nconst nameKey = (first, last) => `${String(first || '').trim().toLowerCase()}_${String(last || '').trim().toLowerCase()}`;\n\n// --- 1. WhatsApp status per phone -------------------------------------------\nconst whatsapp = {};\nif (whatsappOn) {\n  try {\n    const results = $('WhatsApp Validator').all();\n    const phones = $('Unique Phones').all();\n    results.forEach((res, index) => {\n      let row = res.json || {};\n      // Some responses wrap the rows in an array property.\n      const nested = Object.values(row).find(v => Array.isArray(v) && v.length && typeof v[0] === 'object');\n      if (nested) row = nested[0];\n\n      const phone = row.phone_number || row.phone || row.number || row.clean_phone\n        || (results.length === phones.length ? phones[index].json.clean_phone : '');\n      const key = last10(phone);\n      if (!key) return;\n\n      const status = String(row.status || row.whatsapp_status || '').toLowerCase();\n      const active = row.exists === true || row.has_whatsapp === true || ['valid', 'exists', 'active', 'true'].includes(status);\n      whatsapp[key] = active ? 'Active' : 'Not Active';\n    });\n  } catch (e) {}\n}\nconst whatsappFor = phone => {\n  if (!whatsappOn || !phone) return null;\n  const key = last10(phone);\n  return whatsapp[key] !== undefined ? whatsapp[key] : 'Not Checked';\n};\n\n// --- 2. Decision makers found through the website (Snov.io) -------------------\nconst people = {};          // nameKey -> { position, source_page, domain }\ntry {\n  for (const item of $('Limit Prospects').all()) {\n    for (const p of Array.isArray(item.json.data) ? item.json.data : []) {\n      people[nameKey(p.first_name, p.last_name)] = {\n        position: p.position || p.title || null,\n        source_page: p.source_page || null,\n        domain: p.lp_domain || '',\n      };\n    }\n  }\n} catch (e) {}\n\nconst byEmail = {};         // email -> prospect record from the email search\ntry {\n  for (const item of $('Get prospect email search result').all()) {\n    const d = item.json.data;\n    if (!d || Array.isArray(d) || !Array.isArray(d.emails)) continue;\n    for (const e of d.emails) if (e && e.email) byEmail[e.email.toLowerCase()] = d;\n  }\n} catch (e) {}\n\nconst makersByDomain = {};\nconst seenEmails = new Set();\nconst addMaker = (record, email, status) => {\n  if (!email || seenEmails.has(email.toLowerCase())) return;\n  const known = people[nameKey(record.first_name, record.last_name)] || {};\n  const domain = known.domain || domainOf(email);\n  if (!domain) return;\n  seenEmails.add(email.toLowerCase());\n  (makersByDomain[domain] = makersByDomain[domain] || []).push({\n    full_name: `${record.first_name || ''} ${record.last_name || ''}`.trim() || 'Decision Maker',\n    job_title: record.position || known.position || null,\n    verified_email: email,\n    email_status: status,\n    linkedin_url: record.linkedin_url || record.source_page || known.source_page || null,\n    phone_number: null,\n    whatsapp_status: null,\n  });\n};\n\ntry {\n  for (const item of $('Collect Emails').all()) {\n    const d = item.json.data;\n    if (Array.isArray(d)) {\n      // Email-verifier result: [{ email, result: { smtp_status } }]\n      const row = d[0] || {};\n      const status = (row.result && row.result.smtp_status) || row.status;\n      if (row.email && status === 'valid') addMaker(byEmail[row.email.toLowerCase()] || {}, row.email, 'valid');\n    } else if (d && Array.isArray(d.emails) && d.emails[0]) {\n      if (d.emails[0].smtp_status === 'valid') addMaker(d, d.emails[0].email, 'valid');\n    }\n  }\n} catch (e) {}\n\n// --- 3. One company per lead ----------------------------------------------------\nconst companies = [];\nfor (const lead of leads) {\n  const status = whatsappFor(lead.clean_phone);\n  const phone = '+' + lead.clean_phone;\n\n  // The business's own line is the primary contact: it carries the phone,\n  // the WhatsApp result, and the first email found on its website.\n  const contacts = [{\n    full_name: lead.name,\n    job_title: 'Main business line',\n    verified_email: lead.emails[0] || null,\n    email_status: lead.emails[0] ? 'unverified' : null,\n    linkedin_url: lead.socials.linkedin || null,\n    phone_number: phone,\n    whatsapp_status: status,\n  }];\n\n  for (const maker of (lead.domain && makersByDomain[lead.domain]) || []) contacts.push(maker);\n\n  companies.push({\n    company_name: lead.name,\n    website: lead.website,\n    location: lead.full_address,\n    industry: lead.type,\n    company_size: null,\n    hq_phone: phone,\n    decision_makers: contacts,\n\n    // No column of their own; the backend keeps them with the company.\n    source: 'google_maps',\n    has_website: Boolean(lead.website),\n    rating: lead.rating,\n    review_count: lead.review_count,\n    place_link: lead.place_link,\n    google_verified: lead.verified,\n    categories: lead.subtypes,\n    city: lead.city,\n    state: lead.state,\n    country: lead.country,\n    latitude: lead.latitude,\n    longitude: lead.longitude,\n    emails: lead.emails,\n    socials: lead.socials,\n    whatsapp_status: status,\n  });\n}\n\nreturn companies.map(company => ({ json: company }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5400,
+        0
+      ],
+      "id": "95e96698-e10e-4b5b-a4d5-0b074fa75ed9",
+      "name": "Build Leads"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Webhook').first().json.body.progress_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-LeadPilot-Run-Token",
+              "value": "={{ $('Webhook').first().json.body.progress_token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ stage: 'verifying_contacts', message: 'Contacts checked, sending results', count: $('Build Leads').all().length, execution_id: $execution.id }) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        5640,
+        0
+      ],
+      "id": "40b13aff-b3f1-4dda-bd5e-cd9ed6ea7c94",
+      "name": "Verifying Contacts",
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Webhook').first().json.body.results_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-LeadPilot-Run-Token",
+              "value": "={{ $('Webhook').first().json.body.progress_token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ run_id: $('Webhook').first().json.body.run_id, status: 'completed', total_companies: $('Build Leads').all().length, companies: $('Build Leads').all().map(i => i.json) }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        5880,
+        0
+      ],
+      "id": "a821df0a-c816-426e-8bc7-a9c1717fd282",
+      "name": "Send Results to Backend",
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "content": "## LeadPilot · Local Offline Business\n**Before the first run**\n1. Create a *Header Auth* credential named **RapidAPI Key** (Name: `X-RapidAPI-Key`, Value: your key) and select it on **Search Google Maps** and **WhatsApp Validator**.\n2. Webhook must stay **POST**. Test URL = one call per click; activate the workflow and use `/webhook/local-search-V1` for real runs.\n3. Workflow Settings → Error Workflow is already set to the same one as the B2B flow.\n\nThe job's `local_search` block is the API query; `filters` is the rating / review window, applied in **Filter & Keep Phone Leads** because the API cannot filter on it.",
+        "height": 330,
+        "width": 620,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -520
+      ],
+      "id": "502125a2-8439-4359-9444-7adb99f75b0e",
+      "name": "Note 1"
+    },
+    {
+      "parameters": {
+        "content": "### Website bonus (Snov.io)\nOnly leads with a real company domain come here, max 20 per run. Every node continues on error and the branch always reaches **Enrichment Done**, so a Snov.io outage or an empty result can never lose the phone leads.",
+        "height": 170,
+        "width": 620,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1240,
+        -520
+      ],
+      "id": "704a6ae6-6d9d-4ab9-acf2-cdc873915951",
+      "name": "Note 2"
+    },
+    {
+      "parameters": {
+        "content": "### Leads = listings with a phone\nEach becomes a company. Its first contact is the business's own line (phone, WhatsApp status, website email); decision makers found through the website are added after it.",
+        "height": 150,
+        "width": 560,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        5100,
+        -520
+      ],
+      "id": "b949f9a3-42b2-4a11-afc5-c50295b74448",
+      "name": "Note 3"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Prepare Queries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Queries": {
+      "main": [
+        [
+          {
+            "node": "Search Google Maps",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Google Maps": {
+      "main": [
+        [
+          {
+            "node": "Searching Companies",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Filter & Keep Phone Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter & Keep Phone Leads": {
+      "main": [
+        [
+          {
+            "node": "Any Leads?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any Leads?": {
+      "main": [
+        [
+          {
+            "node": "Filtering Results",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Pick Websites To Enrich",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report No Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick Websites To Enrich": {
+      "main": [
+        [
+          {
+            "node": "Has Websites?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Websites?": {
+      "main": [
+        [
+          {
+            "node": "Start prospect profiles",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Enrichment Done",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Start prospect profiles": {
+      "main": [
+        [
+          {
+            "node": "Wait1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait1": {
+      "main": [
+        [
+          {
+            "node": "Get prospect profiles result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get prospect profiles result": {
+      "main": [
+        [
+          {
+            "node": "Limit Prospects",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Limit Prospects": {
+      "main": [
+        [
+          {
+            "node": "Any Prospects?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any Prospects?": {
+      "main": [
+        [
+          {
+            "node": "Split Out1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Enrichment Done",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Split Out1": {
+      "main": [
+        [
+          {
+            "node": "Start prospects emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start prospects emails": {
+      "main": [
+        [
+          {
+            "node": "Wait2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait2": {
+      "main": [
+        [
+          {
+            "node": "Get prospect email search result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get prospect email search result": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Collect Emails",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Start email verification",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Collect Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start email verification": {
+      "main": [
+        [
+          {
+            "node": "Wait3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait3": {
+      "main": [
+        [
+          {
+            "node": "Get email verification result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get email verification result": {
+      "main": [
+        [
+          {
+            "node": "Collect Emails",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Collect Emails": {
+      "main": [
+        [
+          {
+            "node": "Enrichment Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrichment Done": {
+      "main": [
+        [
+          {
+            "node": "Unique Phones",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unique Phones": {
+      "main": [
+        [
+          {
+            "node": "Finding Emails",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Validate WhatsApp?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate WhatsApp?": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp Validator",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp Validator": {
+      "main": [
+        [
+          {
+            "node": "Build Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Leads": {
+      "main": [
+        [
+          {
+            "node": "Verifying Contacts",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verifying Contacts": {
+      "main": [
+        [
+          {
+            "node": "Send Results to Backend",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "saveExecutionProgress": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false,
+    "errorWorkflow": "8jaVvfzmebEYKd5I"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
