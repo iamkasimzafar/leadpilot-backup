@@ -11,8 +11,10 @@ import secrets
 from datetime import UTC, datetime, timedelta
 
 from jwt.exceptions import InvalidTokenError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import google_identity
 from app.core.exceptions import (
     ConflictError,
     EmailNotVerifiedError,
@@ -127,6 +129,73 @@ class AuthService(BaseService):
 
         log.info("auth.login", user_id=user.id)
         return tokens
+
+    # --- Google sign-in ---------------------------------------------------
+    async def authenticate_google(
+        self, access_token: str
+    ) -> tuple[TokenPair, User, bool]:
+        """Sign in -- or sign up -- with a Google access token.
+
+        Returns the tokens, the user, and whether the account was created just
+        now, so the route can send the welcome email exactly once.
+        """
+        identity = await google_identity.verify_access_token(access_token)
+
+        now = datetime.now(UTC)
+
+        # One account per email, however it was first created. Someone who
+        # registered with a password and later clicks "Continue with Google"
+        # lands in that same account -- Google becomes a second way in, never a
+        # second account.
+        user = await self.users.get_by_email(identity.email)
+        created = False
+
+        if user is None:
+            try:
+                # Savepoint: if a concurrent request creates this address first,
+                # the unique index on `email` rejects our insert and only this
+                # nested block rolls back.
+                async with self.db.begin_nested():
+                    user = await self.users.create(
+                        email=identity.email,
+                        # Nobody knows this value, so the account has no usable
+                        # password until its owner sets one through "forgot
+                        # password".
+                        hashed_password=hash_password(secrets.token_urlsafe(32)),
+                        full_name=identity.full_name,
+                        is_verified=True,
+                        verified_at=now,
+                    )
+                created = True
+            except IntegrityError:
+                # Lost the race: the account exists now, so link to it.
+                user = await self.users.get_by_email(identity.email)
+                if user is None:
+                    raise
+
+        if not created:
+            if not user.is_active:
+                raise UnauthorizedError("This account has been deactivated.")
+
+            if not user.is_verified:
+                # Google has just proved who owns this address, which our own
+                # email link never did. Whoever registered it may not be that
+                # person: someone can sign up with a victim's address and wait.
+                # Verifying the account while keeping *their* password would
+                # hand them a working login, so the password goes too.
+                user.hashed_password = hash_password(secrets.token_urlsafe(32))
+                user.is_verified = True
+                user.verified_at = now
+
+            if not user.full_name and identity.full_name:
+                user.full_name = identity.full_name
+
+        user.last_login_at = now
+        tokens = self._issue_tokens(user)
+        await self.commit()
+
+        log.info("auth.login.google", user_id=user.id, created=created)
+        return tokens, user, created
 
     # --- Refresh ----------------------------------------------------------
     async def refresh(self, refresh_token: str) -> TokenPair:

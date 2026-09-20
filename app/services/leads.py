@@ -34,18 +34,28 @@ class LeadService(BaseService):
 
     # --- Reads --------------------------------------------------------------
     async def list_leads(
-        self, user_id: str, *, status: str | None, offset: int, limit: int
+        self,
+        user_id: str,
+        *,
+        status: str | None,
+        offset: int,
+        limit: int,
+        search: str | None = None,
     ) -> tuple[list[Company], int, LeadCounts]:
+        """One page, plus the total and the per-tab counts for the same search,
+        so the three can never disagree."""
+        search = " ".join((search or "").split()) or None
+
         items = await self.companies.list_leads(
-            user_id, status=status, offset=offset, limit=limit
+            user_id, status=status, search=search, offset=offset, limit=limit
         )
-        total = await self.companies.count_leads(user_id, status=status)
-        counts = await self.counts(user_id)
+        total = await self.companies.count_leads(user_id, status=status, search=search)
+        counts = await self.counts(user_id, search=search)
 
         return items, total, counts
 
-    async def counts(self, user_id: str) -> LeadCounts:
-        return LeadCounts(**await self.companies.counts_by_status(user_id))
+    async def counts(self, user_id: str, *, search: str | None = None) -> LeadCounts:
+        return LeadCounts(**await self.companies.counts_by_status(user_id, search=search))
 
     async def get(self, user_id: str, lead_id: str) -> Company:
         company = await self.companies.get_owned(user_id, lead_id)

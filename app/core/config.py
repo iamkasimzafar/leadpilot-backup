@@ -54,6 +54,17 @@ class Settings(BaseSettings):
     # Used to build the links we email out (password reset, email verification).
     FRONTEND_URL: str = "http://localhost:5173"
 
+    # --- Google sign-in ----------------------------------------------------
+    # The OAuth 2.0 *Web* client ID from Google Cloud Console. It must be the
+    # same value the frontend uses (VITE_GOOGLE_CLIENT_ID): tokens issued to any
+    # other client are rejected. Empty switches "Continue with Google" off.
+    GOOGLE_CLIENT_ID: str = ""
+
+    # The desktop app signs in through its own *Desktop app* OAuth client
+    # (Google only lets that type redirect to a loopback port), so its tokens
+    # carry a different audience. Empty means only the web client is accepted.
+    GOOGLE_DESKTOP_CLIENT_ID: str = ""
+
     # --- Email (SMTP) ------------------------------------------------------
     # With EMAIL_ENABLED=false nothing is sent: the message is logged instead,
     # so the whole flow is testable locally without credentials.

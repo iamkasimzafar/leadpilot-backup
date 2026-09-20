@@ -107,15 +107,17 @@ class ReportsRepository:
         stmt = (
             select(
                 func.count(),
-                func.sum(
-                    case((DecisionMaker.verified_email.is_not(None), 1), else_=0)
-                ),
+                func.sum(case((DecisionMaker.verified_email.is_not(None), 1), else_=0)),
                 func.sum(case((DecisionMaker.phone_number.is_not(None), 1), else_=0)),
+                # Results are normalised to "Active" on the way in (see
+                # normalise_whatsapp_status). "valid" is accepted too, for
+                # rows stored before that existed.
                 func.sum(
                     case(
                         (
-                            func.lower(func.coalesce(DecisionMaker.whatsapp_status, ""))
-                            == "valid",
+                            func.lower(
+                                func.coalesce(DecisionMaker.whatsapp_status, "")
+                            ).in_(["active", "valid"]),
                             1,
                         ),
                         else_=0,

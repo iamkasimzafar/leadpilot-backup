@@ -8,6 +8,11 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1)
 
 
+class GoogleLoginRequest(BaseModel):
+    # The OAuth access token from Google's popup, verified server-side.
+    access_token: str = Field(min_length=1, max_length=4096)
+
+
 class RegisterRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)

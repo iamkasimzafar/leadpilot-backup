@@ -29,6 +29,9 @@ from app.services.leads import LeadService
 
 router = APIRouter()
 
+# Long enough for a company name plus a city; short enough to be a search.
+SEARCH_MAX_LENGTH = 100
+
 
 @router.get("", response_model=LeadPage, summary="List my leads")
 async def list_leads(
@@ -38,11 +41,25 @@ async def list_leads(
     status_filter: LeadStatusValue | None = Query(
         None, alias="status", description="Only leads in this status."
     ),
+    q: str | None = Query(
+        None,
+        max_length=SEARCH_MAX_LENGTH,
+        description=(
+            "Search every lead, not just this page: company name, website, "
+            "location, industry, phone, notes, and each contact's name, title, "
+            "email and phone. Every word must match somewhere."
+        ),
+    ),
 ) -> LeadPage:
-    """Most recently added first, with the count for every tab."""
+    """Most recently added first, with the count for every tab.
+
+    `q` is applied in the database before paging, so `total`, the page and the
+    tab counts all describe the matches across the user's whole list.
+    """
     items, total, counts = await LeadService(db).list_leads(
         current_user.id,
         status=status_filter,
+        search=q,
         offset=pagination.offset,
         limit=pagination.limit,
     )
@@ -79,6 +96,11 @@ async def export_leads(
         description="Only these leads (repeat the parameter). Empty means all.",
         max_length=500,
     ),
+    q: str | None = Query(
+        None,
+        max_length=SEARCH_MAX_LENGTH,
+        description="The same search as the list, so the file matches the screen.",
+    ),
 ) -> Response:
     """One row per contact, every matching lead, no page limit.
 
@@ -86,7 +108,7 @@ async def export_leads(
     registered before the parameterised one, or "export" is read as an id.
     """
     body = await LeadExportService(db).export(
-        current_user.id, fmt=fmt, status=status_filter, ids=ids or None
+        current_user.id, fmt=fmt, status=status_filter, ids=ids or None, search=q
     )
     filename = filename_for(fmt, status_filter, datetime.now(UTC))
 

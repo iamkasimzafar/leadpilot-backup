@@ -7,6 +7,7 @@ from app.core import email_templates
 from app.core.email import send_email
 from app.schemas.auth import (
     ForgotPasswordRequest,
+    GoogleLoginRequest,
     LoginRequest,
     RefreshRequest,
     RegisterRequest,
@@ -79,6 +80,24 @@ async def login(payload: LoginRequest, db: DbSession) -> TokenPair:
     return await AuthService(db).authenticate(
         email=payload.email, password=payload.password
     )
+
+
+@router.post("/google", response_model=TokenPair)
+async def login_with_google(
+    payload: GoogleLoginRequest, db: DbSession, background_tasks: BackgroundTasks
+) -> TokenPair:
+    """Sign in with Google, creating the account on first use.
+
+    Google has already confirmed the address, so there is no verification step
+    and a new account goes straight to its welcome email.
+    """
+    tokens, user, created = await AuthService(db).authenticate_google(
+        payload.access_token
+    )
+    if created:
+        _queue_welcome(background_tasks, user.email, user.full_name)
+
+    return tokens
 
 
 @router.post("/refresh", response_model=TokenPair)

@@ -60,11 +60,15 @@
         -192
       ],
       "id": "66a58427-c1bc-44e7-adc6-4a3a7f0c9348",
-      "name": "serper"
+      "name": "serper",
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput",
+      "maxTries": 3
     },
     {
       "parameters": {
-        "jsCode": "const blacklist = [\n  'linkedin.com', 'facebook.com', 'youtube.com', 'instagram.com', 'twitter.com', 'tiktok.com', 'x.com', 'pinterest.com',\n  'alibaba.com', 'amazon.com', 'made-in-china.com', 'globalsources.com', 'thomasnet.com', \n  'yellowpages.com', 'yelp.com', 'trustpilot.com', 'crunchbase.com', 'bloomberg.com', \n  'wikipedia.org', 'reddit.com', 'quora.com', 'medium.com', 'tradeimex.in', 'seair.co.in',\n  'worldbank.org', 'zippia.com', 'unicargo.com', 'ebay.com', 'walmart.com'\n];\n\nconst forbiddenTLDs = ['.gov', '.edu'];\nconst output = [];\n\n// Loop through all incoming Serper keyword outputs\nfor (const item of $input.all()) {\n  const searchResults = item.json.organic || [];\n  const currentKeyword = item.json.searchParameters?.q || $(\"Webhook\").item.json.body.original_keyword;\n\n  const cleanResults = searchResults.filter(result => {\n    if (!result.link) return false;\n    const url = result.link.toLowerCase();\n    \n    const isBlacklisted = blacklist.some(domain => url.includes(domain));\n    const isForbiddenTLD = forbiddenTLDs.some(tld => url.includes(tld));\n\n    return !isBlacklisted && !isForbiddenTLD;\n  });\n\n  cleanResults.forEach(result => {\n  let hostname = result.link || '';\n  try {\n    // Clean string and strip www.\n    const parsed = new URL(hostname);\n    hostname = parsed.hostname.replace(/^www\\./, '');\n  } catch (e) {\n    // Regex fallback if URL constructor fails\n    hostname = hostname.replace(/^(?:https?:\\/\\/)?(?:www\\.)?([^\\/]+).*/i, '$1');\n  }\n\n  output.push({\n    json: {\n      original_keyword: currentKeyword,\n      url: result.link,\n      title: result.title,\n      snippet: result.snippet,\n      domain: hostname\n    }\n  });\n});\n}\n\nreturn output;"
+        "jsCode": "const blacklist = [\n  'linkedin.com', 'facebook.com', 'youtube.com', 'instagram.com', 'twitter.com', 'tiktok.com', 'x.com', 'pinterest.com',\n  'alibaba.com', 'amazon.com', 'made-in-china.com', 'globalsources.com', 'thomasnet.com', \n  'yellowpages.com', 'yelp.com', 'trustpilot.com', 'crunchbase.com', 'bloomberg.com', \n  'wikipedia.org', 'reddit.com', 'quora.com', 'medium.com', 'tradeimex.in', 'seair.co.in',\n  'worldbank.org', 'zippia.com', 'unicargo.com', 'ebay.com', 'walmart.com'\n];\n\nconst forbiddenTLDs = ['.gov', '.edu'];\nconst output = [];\n\n// Loop through all incoming Serper keyword outputs\nfor (const item of $input.all()) {\n  const searchResults = item.json.organic || [];\n  const currentKeyword = item.json.searchParameters?.q || $(\"Webhook\").item.json.body.original_keyword;\n\n  const cleanResults = searchResults.filter(result => {\n    if (!result.link) return false;\n    const url = result.link.toLowerCase();\n    \n    const isBlacklisted = blacklist.some(domain => url.includes(domain));\n    const isForbiddenTLD = forbiddenTLDs.some(tld => url.includes(tld));\n\n    return !isBlacklisted && !isForbiddenTLD;\n  });\n\n  cleanResults.forEach(result => {\n  let hostname = result.link || '';\n  try {\n    // Clean string and strip www.\n    const parsed = new URL(hostname);\n    hostname = parsed.hostname.replace(/^www\\./, '');\n  } catch (e) {\n    // Regex fallback if URL constructor fails\n    hostname = hostname.replace(/^(?:https?:\\/\\/)?(?:www\\.)?([^\\/]+).*/i, '$1');\n  }\n\n  output.push({\n    json: {\n      original_keyword: currentKeyword,\n      url: result.link,\n      title: result.title,\n      snippet: result.snippet,\n      domain: hostname\n    }\n  });\n});\n}\n\nif (!output.length) {\n  throw new Error('LeadPilot Error: no_companies_found - the web search returned no usable company websites for these keywords.');\n}\nreturn output;"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -121,7 +125,10 @@
         -192
       ],
       "id": "0835e098-1891-42e5-8c7a-e412b87fe286",
-      "name": "HTTP Request"
+      "name": "HTTP Request",
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "maxTries": 3
     },
     {
       "parameters": {
@@ -176,7 +183,8 @@
         -192
       ],
       "id": "f73173a0-319c-44ce-8dd6-8566b82ec84e",
-      "name": "Filter"
+      "name": "Filter",
+      "alwaysOutputData": true
     },
     {
       "parameters": {
@@ -185,17 +193,20 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        1712,
+        1936,
         -208
       ],
       "id": "ce665396-8b62-4f9b-b491-8cb8ea15aa25",
       "name": "Start domain search",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
       "credentials": {
         "snovioApi": {
           "id": "uqvwWpTnbjCZIPv3",
           "name": "Snov.io account"
         }
-      }
+      },
+      "maxTries": 3
     },
     {
       "parameters": {
@@ -204,7 +215,7 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        1936,
+        2160,
         -208
       ],
       "id": "4b17af55-ac71-4651-913f-de5520b9b6a7",
@@ -219,17 +230,20 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        2160,
+        2384,
         -208
       ],
       "id": "8a6c21b5-bd27-4239-9fff-4b533e45beb0",
       "name": "Get domain search result",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
       "credentials": {
         "snovioApi": {
           "id": "uqvwWpTnbjCZIPv3",
           "name": "Snov.io account"
         }
-      }
+      },
+      "maxTries": 3
     },
     {
       "parameters": {
@@ -240,17 +254,20 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        2528,
+        2752,
         -208
       ],
       "id": "1f79ac98-2447-4071-8e88-fabcd9a57282",
       "name": "Start prospect profiles",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
       "credentials": {
         "snovioApi": {
           "id": "uqvwWpTnbjCZIPv3",
           "name": "Snov.io account"
         }
-      }
+      },
+      "maxTries": 3
     },
     {
       "parameters": {
@@ -259,7 +276,7 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        2704,
+        2928,
         -192
       ],
       "id": "c9a75270-af98-4166-a81f-bbf5e50e5abd",
@@ -274,17 +291,20 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        2912,
+        3136,
         -208
       ],
       "id": "b68ce519-a65b-41ab-b1bd-9082ba2d1388",
       "name": "Get prospect profiles result",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
       "credentials": {
         "snovioApi": {
           "id": "uqvwWpTnbjCZIPv3",
           "name": "Snov.io account"
         }
-      }
+      },
+      "maxTries": 3
     },
     {
       "parameters": {
@@ -294,7 +314,7 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        3760,
+        3984,
         -224
       ],
       "id": "bce1dbc5-107a-4464-ae21-efcf3a945cbf",
@@ -306,7 +326,8 @@
           "id": "uqvwWpTnbjCZIPv3",
           "name": "Snov.io account"
         }
-      }
+      },
+      "maxTries": 3
     },
     {
       "parameters": {
@@ -316,7 +337,7 @@
       "type": "n8n-nodes-base.splitOut",
       "typeVersion": 1,
       "position": [
-        3536,
+        3760,
         -224
       ],
       "id": "ad723879-28b2-454d-827e-bf121cc3e28a",
@@ -329,7 +350,7 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        3920,
+        4144,
         -224
       ],
       "id": "34acc6a6-6c9b-4f55-9baf-90b824f90e95",
@@ -344,17 +365,20 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        4128,
+        4352,
         -224
       ],
       "id": "7d095309-2b6e-4b07-9c97-2fbba1cd8466",
       "name": "Get prospect email search result",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
       "credentials": {
         "snovioApi": {
           "id": "uqvwWpTnbjCZIPv3",
           "name": "Snov.io account"
         }
-      }
+      },
+      "maxTries": 3
     },
     {
       "parameters": {
@@ -441,7 +465,7 @@
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.4,
       "position": [
-        4352,
+        4576,
         -224
       ],
       "id": "51e924c4-ca21-4393-bb5e-2e2d4d7942de",
@@ -457,24 +481,27 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        4672,
+        4896,
         -192
       ],
       "id": "90f92382-fa19-45af-97f3-dd5685e2a842",
       "name": "Start email verification",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
       "credentials": {
         "snovioApi": {
           "id": "uqvwWpTnbjCZIPv3",
           "name": "Snov.io account"
         }
-      }
+      },
+      "maxTries": 3
     },
     {
       "parameters": {},
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        4848,
+        5072,
         -192
       ],
       "id": "08b4d7bb-84fb-4170-9fc4-f322195ce3b2",
@@ -490,17 +517,20 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        5072,
+        5296,
         -208
       ],
       "id": "768ab62e-a43b-4815-b15d-da42ee789e31",
       "name": "Get email verification result",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
       "credentials": {
         "snovioApi": {
           "id": "uqvwWpTnbjCZIPv3",
           "name": "Snov.io account"
         }
-      }
+      },
+      "maxTries": 3
     },
     {
       "parameters": {
@@ -529,57 +559,24 @@
       "type": "n8n-nodes-base.filter",
       "typeVersion": 2.3,
       "position": [
-        5296,
-        -208
+        5488,
+        -192
       ],
       "id": "94c4585c-4ab5-4316-9585-b87f4ab0b50b",
-      "name": "Keep Only Valid"
+      "name": "Keep Only Valid",
+      "alwaysOutputData": true
     },
     {
       "parameters": {},
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3.2,
       "position": [
-        5552,
+        5776,
         -336
       ],
       "id": "e42b558e-87e7-4c20-a636-ef2f2f4f0a93",
       "name": "Merge",
       "alwaysOutputData": true
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict",
-            "version": 3
-          },
-          "conditions": [
-            {
-              "id": "d56362a7-b07d-44c8-926e-61d71cabfbd9",
-              "leftValue": "={{ $json.clean_phone }}",
-              "rightValue": "",
-              "operator": {
-                "type": "string",
-                "operation": "notEmpty",
-                "singleValue": true
-              }
-            }
-          ],
-          "combinator": "and"
-        },
-        "options": {}
-      },
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2.3,
-      "position": [
-        6224,
-        -336
-      ],
-      "id": "3802e1aa-e726-4542-aca2-09c9d631e816",
-      "name": "Has Phone Number?"
     },
     {
       "parameters": {
@@ -617,7 +614,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        6976,
+        7200,
         -448
       ],
       "id": "f2f62a0c-c5ae-4bc5-80e9-23de69647365",
@@ -627,12 +624,12 @@
     },
     {
       "parameters": {
-        "jsCode": "const seenPhones = new Set();\nconst uniqueItems = [];\n\nfor (const item of $input.all()) {\n  const phone = item.json.clean_phone;\n\n  // If there is no phone number, keep the item or pass it through\n  if (!phone) {\n    uniqueItems.push(item);\n    continue;\n  }\n\n  // Deduplicate based on the exact clean_phone value provided by the previous node\n  if (!seenPhones.has(phone)) {\n    seenPhones.add(phone);\n    uniqueItems.push(item);\n  }\n}\n\nreturn uniqueItems;"
+        "jsCode": "// Unique phone numbers for the WhatsApp check. Never returns nothing: with no\n// phone at all it emits a marker, so the run still reaches Group Leads (which\n// reads its contacts from Merge, not from here).\nconst seen = new Set();\nconst phones = [];\nfor (const item of $input.all()) {\n  const phone = item.json.clean_phone;\n  if (!phone || seen.has(phone)) continue;\n  seen.add(phone);\n  phones.push(item);\n}\nreturn phones.length ? phones : [{ json: { _no_phones: true } }];\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        6512,
+        6736,
         -352
       ],
       "id": "6b813a29-35db-4050-96c1-4a0f36349516",
@@ -665,7 +662,8 @@
       "id": "180dadc1-b8cb-4012-b367-21263b88c506",
       "name": "searching companies",
       "retryOnFail": true,
-      "executeOnce": true
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -694,7 +692,8 @@
       "id": "2c5de302-0326-4000-8060-2f54bc2a539b",
       "name": "AI Analysing",
       "retryOnFail": true,
-      "executeOnce": true
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -717,13 +716,14 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        2304,
+        2528,
         -800
       ],
       "id": "ca51c446-4b6e-4698-b8fd-4fb57f8c0f18",
       "name": "Domain Search",
       "retryOnFail": true,
-      "executeOnce": true
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -746,13 +746,14 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        3328,
+        3552,
         -896
       ],
       "id": "05b54c6d-279b-4248-9315-b1d0ecfc19c0",
       "name": "Finding Decision Makers",
       "retryOnFail": true,
-      "executeOnce": true
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -775,13 +776,14 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        4592,
+        4816,
         -816
       ],
       "id": "3641c282-3f4e-478b-9747-4106e6804ce0",
       "name": "Finding Emails",
       "retryOnFail": true,
-      "executeOnce": true
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -798,28 +800,29 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"stage\": \"verifying_contacts\",\n  \"message\": \"Verification complete\",\n  \"count\": {{ $input.all().length }},\n  \"execution_id\": \"{{ $execution.id }}\",\n  \"status\": \"completed\"\n}",
+        "jsonBody": "={\n  \"stage\": \"verifying_contacts\",\n  \"message\": \"Verification complete\",\n  \"count\": {{ $input.all().length }},\n  \"execution_id\": \"{{ $execution.id }}\"\n}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        5888,
+        6112,
         -912
       ],
       "id": "c8a2691f-719b-443e-bdf3-352b2b5b52be",
       "name": "Verifying Contacts",
       "retryOnFail": true,
-      "executeOnce": true
+      "executeOnce": true,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
-        "jsCode": "const companyMap = {};\n\n// 0. Check if WhatsApp validation was requested from backend Webhook\nconst webhookData = $('Webhook').first().json;\nconst body = webhookData.body || webhookData;\nconst isWhatsappValidationEnabled = body.validate_whatsapp === true;\n\n// Helper to extract last 10 digits for phone lookup\nfunction getPhoneKey(phone) {\n  if (!phone) return '';\n  const digits = String(phone).replace(/[^0-9]/g, '');\n  return digits.length >= 10 ? digits.slice(-10) : digits;\n}\n\n// 1. Build Company Profile Lookup Map from \"Get domain search result\"\nconst companyDetailsMap = {};\ntry {\n  const domainNodes = $('Get domain search result').all();\n  for (const domItem of domainNodes) {\n    const cData = domItem.json.data || domItem.json || {};\n    const site = cData.website || domItem.json.website || cData.domain || domItem.json.domain || '';\n    const domKey = site.replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0].toLowerCase();\n    \n    if (domKey) {\n      companyDetailsMap[domKey] = {\n        company_name: cData.company_name || cData.name || domItem.json.company_name || \"\",\n        company_size: cData.size || cData.company_size || domItem.json.size || domItem.json.company_size || \"N/A\",\n        industry: cData.industry || domItem.json.industry || \"N/A\",\n        hq_phone: cData.hq_phone || cData.company_phone || domItem.json.hq_phone || domItem.json.company_phone || \"\"\n      };\n    }\n  }\n} catch (e) {\n  // Fallback if node was skipped\n}\n\n// 2. Fetch raw profiles for job title fallback lookup\nconst positionLookupMap = {};\ntry {\n  const rawProfiles = $('Get prospect profiles result').all();\n  for (const profileItem of rawProfiles) {\n    const dataList = profileItem.json.data || [];\n    for (const person of dataList) {\n      const fn = (person.first_name || '').trim().toLowerCase();\n      const ln = (person.last_name || '').trim().toLowerCase();\n      const key = `${fn}_${ln}`;\n      if (person.position) {\n        positionLookupMap[key] = person.position;\n      }\n    }\n  }\n} catch (e) {}\n\n// 3. Fetch WhatsApp validation status map (if enabled)\nconst whatsappMap = {};\nif (isWhatsappValidationEnabled) {\n  try {\n    const whatsappResults = $('WhatsApp Validator').all();\n    for (const wa of whatsappResults) {\n      const rawPhone = wa.json.clean_phone || wa.json.phone_number || wa.json.phone || '';\n      const key = getPhoneKey(rawPhone);\n      if (key) {\n        const statusVal = wa.json.status || wa.json.whatsapp_status || \"\";\n        const isExists = wa.json.exists === true || statusVal.toLowerCase() === \"valid\" || statusVal.toLowerCase() === \"exists\" || statusVal.toLowerCase() === \"active\";\n        whatsappMap[key] = isExists ? \"Active\" : \"Not Active\";\n      }\n    }\n  } catch (e) {}\n}\n\n// 4. Process and group prospects from Merge node\nconst enrichedProspects = $('Merge').all();\n\nfor (const item of enrichedProspects) {\n  const data = item.json.data || item.json || {};\n  \n  // Extract email & domain\n  const email = data.emails?.[0]?.email || data.email || item.json.email || '';\n  const domain = email.includes('@') \n    ? email.split('@')[1].toLowerCase() \n    : (item.json.website || '').replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0].toLowerCase();\n  \n  if (!domain) continue;\n\n  // Retrieve original company metadata from domain search lookup map\n  const details = companyDetailsMap[domain] || {};\n\n  // Initialize company entry with true company metadata\n  if (!companyMap[domain]) {\n    companyMap[domain] = {\n      domain: domain,\n      company_name: details.company_name || item.json.company_name || data.company_name || \"\",\n      company_size: details.company_size || item.json.company_size || item.json.employees || data.company_size || \"N/A\",\n      industry: details.industry || item.json.industry || data.industry || \"N/A\",\n      hq_phone: details.hq_phone || item.json.company_phone || data.company_phone || \"\",\n      decision_makers: []\n    };\n  }\n\n  // Extract decision-maker name & position\n  const firstName = data.first_name || item.json.first_name || '';\n  const lastName = data.last_name || item.json.last_name || '';\n  const fullName = `${firstName} ${lastName}`.trim() || 'Decision Maker';\n  const personKey = `${firstName.trim().toLowerCase()}_${lastName.trim().toLowerCase()}`;\n\n  const extractedPosition = \n    data.position || item.json.position || data.job_title || item.json.job_title || positionLookupMap[personKey] || \"N/A\";\n\n  // Determine prospect phone number\n  let prospectPhone = item.json.clean_phone || item.json.phone_number || data.phone || null;\n  if (!prospectPhone && Array.isArray(data.phone_numbers) && data.phone_numbers.length > 0) {\n    prospectPhone = data.phone_numbers[0].phone || null;\n  }\n  if (!prospectPhone) {\n    prospectPhone = companyMap[domain].hq_phone || null;\n  }\n\n  const phoneKey = getPhoneKey(prospectPhone);\n\n  // Toggle WhatsApp Status\n  let whatsappStatus = null;\n  if (isWhatsappValidationEnabled) {\n    if (prospectPhone) {\n      whatsappStatus = (phoneKey && whatsappMap[phoneKey] !== undefined) ? whatsappMap[phoneKey] : \"Not Checked\";\n    } else {\n      whatsappStatus = null;\n    }\n  }\n\n  // Append decision maker\n  companyMap[domain].decision_makers.push({\n    full_name: fullName,\n    job_title: extractedPosition,\n    verified_email: email || null,\n    email_status: data.emails?.[0]?.smtp_status || item.json.smtp_status || \"valid\",\n    linkedin_url: item.json.linkedin_url || data.linkedin_url || item.json.source_page || data.source_page || null,\n    phone_number: prospectPhone || null,\n    whatsapp_status: whatsappStatus\n  });\n}\n\n// Abandon Rule: Silently discard companies with 0 valid decision makers\nconst qualifiedCompanies = Object.values(companyMap).filter(company => company.decision_makers.length > 0);\n\nreturn qualifiedCompanies.map(company => ({ json: { ...company } }));"
+        "jsCode": "const companyMap = {};\n\n// 0. Check if WhatsApp validation was requested from backend Webhook\nconst webhookData = $('Webhook').first().json;\nconst body = webhookData.body || webhookData;\nconst isWhatsappValidationEnabled = body.validate_whatsapp === true;\n\n// Helper to extract last 10 digits for phone lookup\nfunction getPhoneKey(phone) {\n  if (!phone) return '';\n  const digits = String(phone).replace(/[^0-9]/g, '');\n  return digits.length >= 10 ? digits.slice(-10) : digits;\n}\n\n// 1. Build Company Profile Lookup Map from \"Get domain search result\"\nconst companyDetailsMap = {};\ntry {\n  const domainNodes = $('Get domain search result').all();\n  for (const domItem of domainNodes) {\n    const cData = domItem.json.data || domItem.json || {};\n    const site = cData.website || domItem.json.website || cData.domain || domItem.json.domain || '';\n    const domKey = site.replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0].toLowerCase();\n    \n    if (domKey) {\n      companyDetailsMap[domKey] = {\n        company_name: cData.company_name || cData.name || domItem.json.company_name || \"\",\n        company_size: cData.size || cData.company_size || domItem.json.size || domItem.json.company_size || \"N/A\",\n        industry: cData.industry || domItem.json.industry || \"N/A\",\n        hq_phone: cData.hq_phone || cData.company_phone || domItem.json.hq_phone || domItem.json.company_phone || \"\"\n      };\n    }\n  }\n} catch (e) {\n  // Fallback if node was skipped\n}\n\n// 2. Fetch raw profiles for job title fallback lookup\nconst positionLookupMap = {};\ntry {\n  const rawProfiles = $('Get prospect profiles result').all();\n  for (const profileItem of rawProfiles) {\n    const dataList = profileItem.json.data || [];\n    for (const person of dataList) {\n      const fn = (person.first_name || '').trim().toLowerCase();\n      const ln = (person.last_name || '').trim().toLowerCase();\n      const key = `${fn}_${ln}`;\n      if (person.position) {\n        positionLookupMap[key] = person.position;\n      }\n    }\n  }\n} catch (e) {}\n\n// 3. Fetch WhatsApp validation status map (if enabled)\nconst whatsappMap = {};\nif (isWhatsappValidationEnabled) {\n  try {\n    const whatsappResults = $('WhatsApp Validator').all();\n    for (const wa of whatsappResults) {\n      const rawPhone = wa.json.clean_phone || wa.json.phone_number || wa.json.phone || '';\n      const key = getPhoneKey(rawPhone);\n      if (key) {\n        const statusVal = wa.json.status || wa.json.whatsapp_status || \"\";\n        const isExists = wa.json.exists === true || statusVal.toLowerCase() === \"valid\" || statusVal.toLowerCase() === \"exists\" || statusVal.toLowerCase() === \"active\";\n        whatsappMap[key] = isExists ? \"Active\" : \"Not Active\";\n      }\n    }\n  } catch (e) {}\n}\n\n// 4. Process and group prospects from Merge node\nconst enrichedProspects = $('Merge').all();\n\nfor (const item of enrichedProspects) {\n  const data = item.json.data || item.json || {};\n  \n  // Extract email & domain\n  const email = data.emails?.[0]?.email || data.email || item.json.email || '';\n  const domain = email.includes('@') \n    ? email.split('@')[1].toLowerCase() \n    : (item.json.website || '').replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0].toLowerCase();\n  \n  if (!domain) continue;\n\n  // Retrieve original company metadata from domain search lookup map\n  const details = companyDetailsMap[domain] || {};\n\n  // Initialize company entry with true company metadata\n  if (!companyMap[domain]) {\n    companyMap[domain] = {\n      domain: domain,\n      company_name: details.company_name || item.json.company_name || data.company_name || \"\",\n      company_size: details.company_size || item.json.company_size || item.json.employees || data.company_size || \"N/A\",\n      industry: details.industry || item.json.industry || data.industry || \"N/A\",\n      hq_phone: details.hq_phone || item.json.company_phone || data.company_phone || \"\",\n      decision_makers: []\n    };\n  }\n\n  // Extract decision-maker name & position\n  const firstName = data.first_name || item.json.first_name || '';\n  const lastName = data.last_name || item.json.last_name || '';\n  const fullName = `${firstName} ${lastName}`.trim() || 'Decision Maker';\n  const personKey = `${firstName.trim().toLowerCase()}_${lastName.trim().toLowerCase()}`;\n\n  const extractedPosition = \n    data.position || item.json.position || data.job_title || item.json.job_title || positionLookupMap[personKey] || \"N/A\";\n\n  // Determine prospect phone number\n  let prospectPhone = item.json.clean_phone || item.json.phone_number || data.phone || null;\n  if (!prospectPhone && Array.isArray(data.phone_numbers) && data.phone_numbers.length > 0) {\n    prospectPhone = data.phone_numbers[0].phone || null;\n  }\n  if (!prospectPhone) {\n    prospectPhone = companyMap[domain].hq_phone || null;\n  }\n\n  const phoneKey = getPhoneKey(prospectPhone);\n\n  // Toggle WhatsApp Status\n  let whatsappStatus = null;\n  if (isWhatsappValidationEnabled) {\n    if (prospectPhone) {\n      whatsappStatus = (phoneKey && whatsappMap[phoneKey] !== undefined) ? whatsappMap[phoneKey] : \"Not Checked\";\n    } else {\n      whatsappStatus = null;\n    }\n  }\n\n  // Append decision maker\n  companyMap[domain].decision_makers.push({\n    full_name: fullName,\n    job_title: extractedPosition,\n    verified_email: email || null,\n    email_status: data.emails?.[0]?.smtp_status || item.json.smtp_status || \"valid\",\n    linkedin_url: item.json.linkedin_url || data.linkedin_url || item.json.source_page || data.source_page || null,\n    phone_number: prospectPhone || null,\n    whatsapp_status: whatsappStatus\n  });\n}\n\n// Abandon Rule: Silently discard companies with 0 valid decision makers\nconst qualifiedCompanies = Object.values(companyMap).filter(company => company.decision_makers.length > 0);\n\nif (!qualifiedCompanies.length) {\n  throw new Error('LeadPilot Error: no_valid_emails_found - no company was left with a verified decision maker.');\n}\nreturn qualifiedCompanies.map(company => ({ json: { ...company } }));"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        7232,
+        7456,
         -336
       ],
       "id": "e8daed32-6242-475a-9e13-2f2a588b7948",
@@ -828,7 +831,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://7e6c-205-164-155-250.ngrok-free.app/api/v1/lead-radar/results",
+        "url": "={{ $('Webhook').first().json.body.results_url }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -846,22 +849,25 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        7456,
+        7680,
         -336
       ],
       "id": "8a024bb9-f8ac-4766-b601-b8291a29a77c",
       "name": "Send Results to Backend",
-      "executeOnce": true
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 5000
     },
     {
       "parameters": {
-        "jsCode": "// 1. Retrieve target min/max boundaries from Webhook payload\nconst webhookData = $('Webhook').first().json;\nconst body = webhookData.body || webhookData;\n\nconst targetMin = body.company_size_min !== undefined && body.company_size_min !== null ? parseInt(body.company_size_min, 10) : null;\nconst targetMax = body.company_size_max !== undefined && body.company_size_max !== null ? parseInt(body.company_size_max, 10) : null;\n\n// Set your hard limit here to control costs\nconst MAX_COMPANIES = 30; \n\n// Helper function to parse size strings like \"11-50\", \"1-10\", \"501+\", \"11 - 50\"\nfunction parseSizeRange(sizeStr) {\n  if (!sizeStr || typeof sizeStr !== 'string') return null;\n\n  const numbers = sizeStr.match(/\\d+/g);\n  if (!numbers || numbers.length === 0) return null;\n\n  if (numbers.length === 1) {\n    const val = parseInt(numbers[0], 10);\n    return { min: val, max: val };\n  }\n\n  return {\n    min: parseInt(numbers[0], 10),\n    max: parseInt(numbers[1], 10)\n  };\n}\n\nconst keptItems = [];\n\nfor (const item of $input.all()) {\n  const companyData = item.json.data || item.json;\n  const companySizeStr = companyData.size || item.json.size;\n\n  // RULE 1: If user selected \"any size\" (targets are null), allow ALL companies immediately\n  if (targetMin === null && targetMax === null) {\n    keptItems.push(item);\n    continue;\n  }\n\n  // RULE 2: Strict enforcement. If a specific size is set, discard companies with no size defined.\n  if (!companySizeStr || companySizeStr.trim() === \"\" || companySizeStr.toLowerCase() === \"n/a\") {\n    continue;\n  }\n\n  // Parse actual company size range\n  const actualRange = parseSizeRange(companySizeStr);\n\n  // If size string could not be parsed into numbers, discard\n  if (!actualRange) {\n    continue;\n  }\n\n  // Check strict range overlap\n  const isWithinRange = (actualRange.min <= targetMax) && (actualRange.max >= targetMin);\n\n  if (isWithinRange) {\n    keptItems.push(item);\n  }\n}\n\n// Apply the hard limit (slices the array to keep only the top results up to MAX_COMPANIES)\nreturn keptItems.slice(0, MAX_COMPANIES);"
+        "jsCode": "// 1. Retrieve target min/max boundaries from Webhook payload\nconst webhookData = $('Webhook').first().json;\nconst body = webhookData.body || webhookData;\n\nconst targetMin = body.company_size_min !== undefined && body.company_size_min !== null ? parseInt(body.company_size_min, 10) : null;\nconst targetMax = body.company_size_max !== undefined && body.company_size_max !== null ? parseInt(body.company_size_max, 10) : null;\n\n// Set your hard limit here to control costs\nconst MAX_COMPANIES = 30; \n\n// Helper function to parse size strings like \"11-50\", \"1-10\", \"501+\", \"11 - 50\"\nfunction parseSizeRange(sizeStr) {\n  if (!sizeStr || typeof sizeStr !== 'string') return null;\n\n  const numbers = sizeStr.match(/\\d+/g);\n  if (!numbers || numbers.length === 0) return null;\n\n  if (numbers.length === 1) {\n    const val = parseInt(numbers[0], 10);\n    return { min: val, max: val };\n  }\n\n  return {\n    min: parseInt(numbers[0], 10),\n    max: parseInt(numbers[1], 10)\n  };\n}\n\nconst keptItems = [];\n\nfor (const item of $input.all()) {\n  const companyData = item.json.data || item.json;\n  // Snov.io names this field differently across responses, and may send a number.\n  const rawSize = companyData.size ?? companyData.company_size ?? item.json.size ?? item.json.company_size ?? '';\n  const companySizeStr = String(rawSize).trim();\n\n  // RULE 1: If user selected \"any size\" (targets are null), allow ALL companies immediately\n  if (targetMin === null && targetMax === null) {\n    keptItems.push(item);\n    continue;\n  }\n\n  // RULE 2: Unknown size is KEPT. Snov.io has no employee count for most small\n  // businesses, which are exactly what a \"1-10\" search is after; discarding them\n  // made that band return nothing. Only a KNOWN size outside the range is dropped.\n  if (!companySizeStr || companySizeStr.toLowerCase() === \"n/a\") {\n    keptItems.push(item);\n    continue;\n  }\n\n  // Parse actual company size range\n  const actualRange = parseSizeRange(companySizeStr);\n\n  // A size we cannot read is unknown too: keep it rather than guess.\n  if (!actualRange) {\n    keptItems.push(item);\n    continue;\n  }\n\n  // Check strict range overlap\nconst aboveMin = targetMin === null || actualRange.max >= targetMin;\nconst belowMax = targetMax === null || actualRange.min <= targetMax;\nconst isWithinRange = aboveMin && belowMax;\n\n  if (isWithinRange) {\n    keptItems.push(item);\n  }\n}\n\nif (!keptItems.length) {\n  throw new Error(`LeadPilot Error: no_company_size_match - ${$input.all().length} companies were found but none matched the requested company size.`);\n}\nreturn keptItems.slice(0, MAX_COMPANIES);"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2336,
-        -208
+        2576,
+        -224
       ],
       "id": "c21d08a2-caef-44c1-b36a-02fe00d3ad7f",
       "name": "Filter the companies"
@@ -873,7 +879,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3264,
+        3488,
         -208
       ],
       "id": "b4a20b38-6f5e-4952-8b82-9e6d06b108d8",
@@ -891,7 +897,7 @@
           "conditions": [
             {
               "id": "b8f7db50-f186-4d2b-af9a-b6439ba4dfe7",
-              "leftValue": "={{ $('Webhook').first().json.body?.validate_whatsapp }}",
+              "leftValue": "={{ $('Webhook').first().json.body?.validate_whatsapp === true && $json._no_phones !== true }}",
               "rightValue": "",
               "operator": {
                 "type": "boolean",
@@ -907,77 +913,11 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        6736,
+        6960,
         -352
       ],
       "id": "a8e1ef84-2ec4-4279-9e7c-e0d778e37712",
       "name": "If"
-    },
-    {
-      "parameters": {
-        "conditions": {
-          "options": {
-            "caseSensitive": true,
-            "leftValue": "",
-            "typeValidation": "strict",
-            "version": 3
-          },
-          "conditions": [
-            {
-              "id": "9c115824-4bf7-49bb-88ba-061c9c9e92ba",
-              "leftValue": "={{ $json.email || $json.data?.emails?.[0]?.email }}",
-              "rightValue": "",
-              "operator": {
-                "type": "string",
-                "operation": "notEmpty",
-                "singleValue": true
-              }
-            }
-          ],
-          "combinator": "and"
-        },
-        "options": {}
-      },
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2.3,
-      "position": [
-        5776,
-        -336
-      ],
-      "id": "5f748d23-40f0-413c-a8d5-538ce4497c19",
-      "name": "If1"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "https://7e6c-205-164-155-250.ngrok-free.app/api/v1/lead-radar/results",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "X-LeadPilot-Run-Token",
-              "value": "={{ $('Webhook').first().json.body.progress_token }}"
-            },
-            {
-              "name": "X-LeadPilot-Run-Id",
-              "value": "={{ $('Webhook').first().json.body.run_id }}"
-            }
-          ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "{\n  \"status\": \"failed\",\n  \"reason\": \"no_valid_emails_found\",\n  \"message\": \"Zero valid emails were found for any decision makers in this search batch.\"\n}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.5,
-      "position": [
-        6000,
-        -80
-      ],
-      "id": "15579bd1-ed1a-473a-bfbf-b0ac76d7f289",
-      "name": "HTTP Request1",
-      "executeOnce": true
     },
     {
       "parameters": {
@@ -986,11 +926,53 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        6000,
+        6224,
         -336
       ],
       "id": "2c015657-3f96-4817-a48d-4c63320701b5",
       "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter has \"Always Output Data\" on, so when nothing qualifies it hands over\n// one empty item instead of stopping the run silently. Turn that into a named\n// failure the backend can show the user.\nconst real = $input.all().filter(i => i.json && i.json.domain);\nif (!real.length) {\n  const seen = $('Parse DeepSeek Response').all().length;\n  throw new Error(`LeadPilot Error: no_companies_found - none of the ${seen} search results qualified as a matching company website.`);\n}\nreturn real;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        -192
+      ],
+      "id": "6677ace6-e207-4873-be07-f832d37bb0ba",
+      "name": "Guard: AI Qualified",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// The verifier answers { data: [ { email, result } ] }, but everything after\n// Merge expects the prospect record { data: { first_name, emails: [...] } }.\n// Put the verified status back on the original prospect (paired item through\n// Switch), so a verified email is a lead instead of being dropped.\nif (!$json.data || !Array.isArray($json.data) || !$json.data[0]) {\n  return { json: {} }; // the empty item from \"Always Output Data\"\n}\nconst prospect = JSON.parse(JSON.stringify($('Switch').item.json));\nconst verified = $json.data[0];\nif (prospect.data && Array.isArray(prospect.data.emails) && prospect.data.emails[0]) {\n  prospect.data.emails[0].smtp_status = (verified.result && verified.result.smtp_status) || 'valid';\n}\nreturn { json: prospect };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5664,
+        -240
+      ],
+      "id": "e6b8163d-092f-4ee4-be2a-5969645a8128",
+      "name": "Restore Prospect",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Only contacts with a verified email go on. If there is none, say so: the\n// backend shows the user \"no valid emails found\" and charges nothing.\nconst withEmail = $input.all().filter(i => {\n  const d = i.json && i.json.data;\n  const e = d && !Array.isArray(d) && Array.isArray(d.emails) ? d.emails[0] : null;\n  return e && e.email && e.smtp_status === 'valid';\n});\nif (!withEmail.length) {\n  throw new Error(`LeadPilot Error: no_valid_emails_found - none of the ${$input.all().length} decision makers had a verifiable email address.`);\n}\nreturn withEmail;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        6000,
+        -336
+      ],
+      "id": "8c3b7d1f-e732-4746-8117-4a6ecf67a698",
+      "name": "Guard: Valid Emails"
     }
   ],
   "pinData": {},
@@ -1086,7 +1068,7 @@
       "main": [
         [
           {
-            "node": "Start domain search",
+            "node": "Guard: AI Qualified",
             "type": "main",
             "index": 0
           }
@@ -1234,7 +1216,13 @@
             "index": 0
           }
         ],
-        []
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Start email verification": {
@@ -1274,9 +1262,9 @@
       "main": [
         [
           {
-            "node": "Merge",
+            "node": "Restore Prospect",
             "type": "main",
-            "index": 1
+            "index": 0
           }
         ]
       ]
@@ -1290,18 +1278,7 @@
             "index": 0
           },
           {
-            "node": "If1",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Has Phone Number?": {
-      "main": [
-        [
-          {
-            "node": "Remove duplicate",
+            "node": "Guard: Valid Emails",
             "type": "main",
             "index": 0
           }
@@ -1381,29 +1358,44 @@
         ]
       ]
     },
-    "If1": {
+    "Code in JavaScript": {
       "main": [
         [
           {
-            "node": "Code in JavaScript",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "HTTP Request1",
+            "node": "Remove duplicate",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Code in JavaScript": {
+    "Guard: AI Qualified": {
       "main": [
         [
           {
-            "node": "Has Phone Number?",
+            "node": "Start domain search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Prospect": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Guard: Valid Emails": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
             "type": "main",
             "index": 0
           }
@@ -1419,9 +1411,10 @@
     "saveExecutionProgress": true,
     "callerPolicy": "workflowsFromSameOwner",
     "availableInMCP": false,
-    "errorWorkflow": "8jaVvfzmebEYKd5I"
+    "errorWorkflow": "8jaVvfzmebEYKd5I",
+    "executionTimeout": 1800
   },
-  "versionId": "c0c3ce37-e2c7-4207-a4f1-05859abe82ac",
+  "versionId": "e66a2935-c356-4ab3-86c5-75cc5748777b",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "637fc58fdfcd37c603408ad0e89fcc31830fb4ad32d730273f7b375c9871f3cb"

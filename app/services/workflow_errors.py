@@ -57,6 +57,12 @@ _PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
     # decision makers. Not an outage: a different keyword or looser filters
     # is the fix, so it is "retryable" in the sense of trying again differently.
     (("no valid email", "zero valid email", "no emails found"), "no_valid_emails_found"),
+    # "Zero decision-makers found matching target roles" is what the B2B
+    # workflow's prospect limiter throws.
+    (
+        ("zero decision-maker", "zero decision maker", "no decision maker"),
+        "no_decision_makers_found",
+    ),
 )
 
 # What each reason means for the user, and whether retrying is worth it.
@@ -72,13 +78,30 @@ REASONS: dict[str, bool] = {
     # inside the rating / review window. A wider area, a different keyword or
     # a looser filter is the fix, so it is worth trying again differently.
     "no_local_businesses_found": True,
+    # The "nothing to show" endings of the B2B workflow. Each used to be a
+    # silent dead end (a node that outputs no items stops an n8n run without
+    # an error); the workflow now throws "LeadPilot Error: <code> - ..." there,
+    # so the user is told at once, and told which step came up empty. None is
+    # an outage: different keywords or looser filters are the fix.
+    "no_companies_found": True,
+    "no_company_size_match": True,
+    "no_decision_makers_found": True,
     "unknown": True,
 }
+
+# Reasons the workflow may name outright in a thrown message. Checked before
+# the text patterns: the workflow knows why it stopped better than a guess
+# from its wording ("... 0 of 429 results ..." is not a rate limit).
+_NAMED_REASONS = tuple(reason for reason in REASONS if reason.startswith("no_"))
 
 
 def explain(message: str) -> str:
     """Classify a raw n8n error into one of REASONS."""
     text = (message or "").lower()
+
+    for reason in _NAMED_REASONS:
+        if reason in text:
+            return reason
 
     for needles, reason in _PATTERNS:
         if any(needle in text for needle in needles):

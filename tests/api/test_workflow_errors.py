@@ -262,6 +262,21 @@ async def test_an_error_after_the_last_checkpoint_but_before_results_fails_the_r
         ("ETIMEDOUT", "timeout"),
         ("getaddrinfo ENOTFOUND api.example.com", "unreachable"),
         ("Unexpected token < in JSON at position 0", "bad_response"),
+        # A reason the workflow names outright wins over the wording around it:
+        # "429" here is a result count, not a rate limit.
+        (
+            "LeadPilot Error: no_companies_found - 0 of 429 results were company sites",
+            "no_companies_found",
+        ),
+        (
+            "LeadPilot Error: no_company_size_match - 12 companies",
+            "no_company_size_match",
+        ),
+        ("LeadPilot Error: no_valid_emails_found - 8 prospects", "no_valid_emails_found"),
+        (
+            "LeadPilot Error: Zero decision-makers found matching target roles",
+            "no_decision_makers_found",
+        ),
         ("Something nobody predicted", "unknown"),
         ("", "unknown"),
     ],

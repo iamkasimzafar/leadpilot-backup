@@ -92,7 +92,7 @@ def test_null_whatsapp_means_unchecked_not_inactive() -> None:
 
 
 def test_placeholder_values_become_null() -> None:
-    """"N/A" must not reach the UI as if it were a real value."""
+    """ "N/A" must not reach the UI as if it were a real value."""
     contact = DecisionMakerIn.model_validate(
         _contact(job_title="N/A", whatsapp_status="-", phone_number="unknown")
     )
@@ -107,13 +107,15 @@ def test_placeholder_values_become_null() -> None:
 
 def test_boolean_whatsapp_status_is_coerced() -> None:
     """A JS `true` would otherwise fail the whole batch."""
-    assert DecisionMakerIn.model_validate(
-        _contact(whatsapp_status=True)
-    ).whatsapp_status == "Active"
+    assert (
+        DecisionMakerIn.model_validate(_contact(whatsapp_status=True)).whatsapp_status
+        == "Active"
+    )
 
-    assert DecisionMakerIn.model_validate(
-        _contact(whatsapp_status=False)
-    ).whatsapp_status == "Not Active"
+    assert (
+        DecisionMakerIn.model_validate(_contact(whatsapp_status=False)).whatsapp_status
+        == "Not Active"
+    )
 
 
 def test_numeric_phone_number_is_coerced() -> None:
@@ -150,11 +152,14 @@ def test_long_job_title_is_trimmed_and_preserved() -> None:
     assert (contact.model_extra or {})["job_title_full"] == " ".join(title.split())
 
 
-def test_long_whatsapp_status_is_trimmed() -> None:
+def test_long_whatsapp_status_is_read_by_its_leading_phrase() -> None:
+    """The status column holds one of three values (see test_whatsapp_status),
+    so a descriptive label is reduced to its verdict. The original wording is
+    still kept, like any other over-long value."""
     status = "Active on WhatsApp Business with verified display name"
     contact = DecisionMakerIn.model_validate(_contact(whatsapp_status=status))
 
-    assert len(contact.whatsapp_status or "") == 32
+    assert contact.whatsapp_status == "Active"
     assert (contact.model_extra or {})["whatsapp_status_full"] == status
 
 

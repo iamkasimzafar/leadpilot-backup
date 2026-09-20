@@ -48,6 +48,73 @@ def _coerce_to_text(value: Any) -> Any:
     return value
 
 
+WHATSAPP_ACTIVE = "Active"
+WHATSAPP_NOT_ACTIVE = "Not Active"
+
+# What the workflows and their validator APIs actually send, lower-cased.
+_WHATSAPP_POSITIVE = {
+    "active", "valid", "exists", "exist", "true", "yes", "registered", "on whatsapp",
+}  # fmt: skip
+_WHATSAPP_NEGATIVE = {
+    "not active", "inactive", "invalid", "not found", "false", "no", "not registered",
+    "unregistered", "unavailable", "not available", "not on whatsapp",
+}  # fmt: skip
+
+# Phrases unambiguous enough to decide a longer label by its opening words.
+# Deliberately without "no" / "yes" / "true": "no response from the API" is
+# not a negative result.
+_WHATSAPP_NEGATIVE_LEADS = (
+    "not active", "inactive", "invalid", "not found", "not registered", "not on whatsapp",
+)  # fmt: skip
+_WHATSAPP_POSITIVE_LEADS = ("active", "valid", "exists", "registered", "on whatsapp")
+
+
+def normalise_whatsapp_status(value: Any) -> str | None:
+    """One vocabulary for a WhatsApp check, whatever the workflow called it.
+
+    Three consumers read this column and each used to have its own idea of the
+    words: billing charges a check for every non-null value, the reports count
+    the positives, and the UI shows a green, a dimmed or no icon. So the value
+    is pinned here, where results enter:
+
+      "Active"      the number is on WhatsApp   ("valid", true, "exists", ...)
+      "Not Active"  checked, and it is not      ("invalid", false, ...)
+      None          no check was made
+
+    None is also the answer for a label that is neither -- "Not Checked", an
+    API error text, anything unrecognised. Claiming a number is reachable, or
+    charging for a check, on the strength of a word we do not know would both
+    be wrong; saying nothing is not.
+    """
+    value = _coerce_to_text(value)
+    if not isinstance(value, str):
+        return None
+
+    label = " ".join(value.split()).casefold()
+    if label in _WHATSAPP_POSITIVE:
+        return WHATSAPP_ACTIVE
+    if label in _WHATSAPP_NEGATIVE:
+        return WHATSAPP_NOT_ACTIVE
+
+    # A descriptive label ("Active on WhatsApp Business, verified name") is
+    # read by its leading phrase. Negatives first, so "not active ..." is never
+    # taken for "active ..."; and only whole words, so "validation failed" is
+    # not "valid".
+    for phrases, verdict in (
+        (_WHATSAPP_NEGATIVE_LEADS, WHATSAPP_NOT_ACTIVE),
+        (_WHATSAPP_POSITIVE_LEADS, WHATSAPP_ACTIVE),
+    ):
+        for phrase in phrases:
+            if (
+                len(label) > len(phrase)
+                and label.startswith(phrase)
+                and not label[len(phrase)].isalnum()
+            ):
+                return verdict
+
+    return None
+
+
 # Column widths, so a value too long for the database is trimmed here rather
 # than failing the whole batch. The untrimmed original is kept in extra_json.
 _CONTACT_LIMITS = {
@@ -117,12 +184,16 @@ class DecisionMakerIn(BaseModel):
         "email_status",
         "linkedin_url",
         "phone_number",
-        "whatsapp_status",
         mode="before",
     )
     @classmethod
     def _clean(cls, value: Any) -> Any:
         return _blank_to_none(value)
+
+    @field_validator("whatsapp_status", mode="before")
+    @classmethod
+    def _whatsapp(cls, value: Any) -> Any:
+        return normalise_whatsapp_status(value)
 
     @field_validator("full_name", mode="before")
     @classmethod
@@ -232,7 +303,7 @@ class SearchResultsRequest(BaseModel):
     @field_validator("status", mode="before")
     @classmethod
     def _lower_status(cls, value: Any) -> Any:
-        """"FAILED", "Failed" and "failed" all mean the same thing."""
+        """ "FAILED", "Failed" and "failed" all mean the same thing."""
         return value.strip().lower() if isinstance(value, str) else value
 
     @field_validator("reason", mode="before")
@@ -386,12 +457,16 @@ class DecisionMakerUpdate(BaseModel):
         "email_status",
         "linkedin_url",
         "phone_number",
-        "whatsapp_status",
         mode="before",
     )
     @classmethod
     def _clean(cls, value: Any) -> Any:
         return _blank_to_none(value)
+
+    @field_validator("whatsapp_status", mode="before")
+    @classmethod
+    def _whatsapp(cls, value: Any) -> Any:
+        return normalise_whatsapp_status(value)
 
 
 class BulkStatusRequest(BaseModel):

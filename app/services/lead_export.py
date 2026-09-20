@@ -163,10 +163,13 @@ class LeadExportService(BaseService):
         fmt: ExportFormat,
         status: str | None = None,
         ids: list[str] | None = None,
+        search: str | None = None,
     ) -> bytes:
-        """The file body for this user's leads, narrowed by status and/or ids."""
+        """The file body for this user's leads, narrowed by status, ids and/or
+        the My Leads search text."""
+        search = " ".join((search or "").split()) or None
         companies = await self.companies.list_leads_for_export(
-            user_id, status=status, ids=ids
+            user_id, status=status, ids=ids, search=search
         )
 
         return render_xlsx(companies) if fmt == "xlsx" else render_csv(companies)
