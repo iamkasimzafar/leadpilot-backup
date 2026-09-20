@@ -1,0 +1,67 @@
+# Production compose for the aaPanel server.
+#
+# This file lives on the server (as docker-compose.yml in the deploy folder)
+# and is NOT what `docker compose up` uses locally -- docker-compose.yml in the
+# repo root is the local dev stack, with its own database and hot reload.
+#
+# The image is never built here. GitHub Actions builds and pushes it, and this
+# file only says which tag to run, so a deploy is a pull and a restart.
+#
+# MySQL is aaPanel's own, running on the host rather than in a container, so
+# aaPanel's backups and phpMyAdmin keep working. `host.docker.internal` is what
+# reaches it from inside the container (see extra_hosts below).
+
+services:
+  api:
+    # Set by the deploy workflow in .env.deploy. Pinned to a commit SHA rather
+    # than :latest so the running version is always identifiable, and so a
+    # restart cannot silently pick up a different build.
+    image: ${LEADPILOT_IMAGE:?set LEADPILOT_IMAGE in .env.deploy}
+    container_name: leadpilot-api
+    restart: unless-stopped
+
+    # Secrets and settings. Lives beside this file on the server, root-owned
+    # and chmod 600 -- it holds the JWT secret and every provider API key.
+    env_file: .env
+
+    environment:
+      ENVIRONMENT: production
+      DEBUG: "false"
+
+      # aaPanel's MySQL listens on the host. The container reaches it through
+      # the gateway alias below rather than 127.0.0.1, which inside a container
+      # means the container itself.
+      MYSQL_HOST: host.docker.internal
+
+    # Docker on Linux does not define this name by default, unlike Desktop.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    # Bound to localhost only: aaPanel's nginx terminates TLS and proxies to
+    # this port, so exposing it publicly would bypass both.
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+
+    # The readiness probe hits the database, so an unhealthy container means
+    # "cannot serve", not merely "process alive".
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready', timeout=4).status == 200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+    # Without a cap, one runaway request can take the whole box down --
+    # including aaPanel itself and the MySQL this depends on.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+    # The default json-file driver grows without bound and is a common cause
+    # of a full disk months later.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

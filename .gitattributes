@@ -1,0 +1,10 @@
+# Shell scripts must keep LF endings even when checked out on Windows.
+# A CRLF shebang makes Linux report "no such file or directory" for a script
+# that is plainly there, which is a genuinely baffling way to lose an hour.
+*.sh text eol=lf
+docker/entrypoint.sh text eol=lf
+
+# Same reasoning for the files Docker and CI read.
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
