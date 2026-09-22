@@ -65,35 +65,45 @@ RESULTS_DEADLOCK_RETRIES = 3
 @router.post(
     "/expand",
     response_model=ExpandKeywordResponse,
-    summary="AI-expand a product keyword",
+    summary="AI-expand one or more product keywords together",
 )
 async def expand_keyword(
     payload: ExpandKeywordRequest, db: DbSession, current_user: CurrentUser
 ) -> ExpandKeywordResponse:
-    """Validate the keyword and expand it into synonyms, buyer scenarios and
-    multi-language variants. Answers `valid: false` (HTTP 200) for input that
-    is not a real product / industry term, so the UI can explain rather than
-    error out.
+    """Validate every submitted keyword tag and expand the usable ones
+    together into ONE combined set of synonyms, buyer scenarios and
+    multi-language variants (up to 30 terms total, however many keywords were
+    submitted). Answers `valid: false` (HTTP 200) when none of them are real
+    product / industry terms, so the UI can explain rather than error out.
 
-    Costs credits. The wallet is checked before calling DeepSeek (so a user who
+    Costs credits -- a single flat charge for the whole batch, not one per
+    keyword. The wallet is checked before calling DeepSeek (so a user who
     cannot pay is turned away with 402 rather than burning an API call) and
     debited only once a usable expansion comes back -- a timeout, an upstream
-    failure or a rejected keyword all leave the balance untouched.
+    failure, or every keyword being rejected, all leave the balance untouched.
     """
     billing = BillingService(db)
 
     await billing.ensure_can_afford(current_user.id, AI_KEYWORD_EXPANSION_CREDITS)
 
-    result = await KeywordExpansionService().expand(payload.keyword, payload.company_type)
+    result = await KeywordExpansionService().expand(
+        payload.keywords, payload.company_type
+    )
 
     # Nothing usable was produced, so there is nothing to charge for.
     if not result.valid:
         return result
 
+    label = result.normalized_keyword or ", ".join(payload.keywords)
+    description = f"AI keyword expansion — {label}"
+
     transaction = await billing.spend(
         current_user.id,
         AI_KEYWORD_EXPANSION_CREDITS,
-        f"AI keyword expansion — {result.normalized_keyword or payload.keyword}",
+        # BillingTransaction.description is String(255); several keyword tags
+        # joined together can run long, so truncate rather than risk an
+        # insert error on a rare pathological input.
+        description[:255],
         reference_type="keyword_expansion",
     )
 

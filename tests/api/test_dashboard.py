@@ -9,10 +9,7 @@ from httpx import AsyncClient
 
 from app.core.config import settings
 from app.services import lead_search as lead_search_module
-from app.services.billing_catalog import (
-    COMPANY_RESULT_CREDITS,
-    SEARCH_RUN_CREDITS,
-)
+from app.services.billing_catalog import BASE_CONTACT_CREDIT
 from app.services.dashboard import local_day_start_utc
 from tests.api.test_auth import signed_in_tokens
 
@@ -25,7 +22,11 @@ def _company(name: str, website: str, contacts: int) -> dict[str, Any]:
         "company_name": name,
         "website": website,
         "decision_makers": [
-            {"full_name": f"{name} {i}", "verified_email": f"p{i}@{website[8:]}"}
+            {
+                "full_name": f"{name} {i}",
+                "verified_email": f"p{i}@{website[8:]}",
+                "email_status": "valid",
+            }
             for i in range(contacts)
         ],
     }
@@ -181,8 +182,8 @@ async def test_figures_reflect_real_activity(
     assert body["searches_today"] == 1
     assert body["contacts_found_today"] == 6
     # Starter grants 490. The search is then settled from what came back:
-    # the run fee plus one company charge per company.
-    expected_charge = SEARCH_RUN_CREDITS + 3 * COMPANY_RESULT_CREDITS
+    # 10 credits per verified-email contact, no run fee or company charge.
+    expected_charge = 6 * BASE_CONTACT_CREDIT
     assert body["credits_left"] == 490 - expected_charge
     assert body["leads_total"] == 3
 

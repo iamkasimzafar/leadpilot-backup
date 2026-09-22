@@ -86,7 +86,8 @@ class Settlement:
 
     charged: int
     shortfall: int
-    whatsapp_checks: int
+    verified_contacts: int
+    active_whatsapp: int
 
     # The full bill: charged + shortfall.
     billed: int
@@ -238,7 +239,7 @@ class LeadResultsService(BaseService):
                 .values(credits_charged_at=now)
             )
             if claimed.rowcount == 1:  # type: ignore[attr-defined]
-                settled = await self._settle(run, companies=total)
+                settled = await self._settle(run)
                 await self.db.refresh(run)
 
         notification = None
@@ -387,28 +388,33 @@ class LeadResultsService(BaseService):
 
         return created
 
-    async def _settle(self, run: LeadSearchRun, *, companies: int) -> Settlement:
+    async def _settle(self, run: LeadSearchRun) -> Settlement:
         """Bill the run from what it actually returned.
 
-        Run fee, then companies, then WhatsApp checks, charged in that order
-        until the balance runs out; whatever is left over is recorded on the
-        run as a shortfall rather than refused, because the workflow has
-        already done the work. Does not commit: it joins the ingest
+        Nothing is charged for a company by itself. The base fee is charged
+        per decision maker with a verified email; the WhatsApp premium on top
+        of that, only for the ones that came back Active. Charged in that
+        order until the balance runs out; whatever is left over is recorded
+        on the run as a shortfall rather than refused, because the workflow
+        has already done the work. Does not commit: it joins the ingest
         transaction, so the results and their charge land together or not at
         all.
         """
-        # Only numbers the workflow actually checked, and only if the user
-        # asked for validation. Charged whether the number was active or not.
-        checks = (
-            await self.contacts.count_whatsapp_checked_for_run(run.id)
+        verified_contacts = await self.contacts.count_verified_email_for_run(run.id)
+
+        # WhatsApp is only ever a premium on a contact already billed for its
+        # verified email, and only when the user asked for validation in the
+        # first place -- a status the workflow reported anyway is not a
+        # reason to charge.
+        active_whatsapp = (
+            await self.contacts.count_active_whatsapp_for_run(run.id)
             if run.validate_whatsapp
             else 0
         )
 
         lines = cost_lines(
-            companies=companies,
-            whatsapp_checks=checks,
-            validate_whatsapp=run.validate_whatsapp,
+            verified_contacts=verified_contacts,
+            active_whatsapp=active_whatsapp,
         )
 
         charged, shortfall = await self.billing.charge_capped(
@@ -424,7 +430,7 @@ class LeadResultsService(BaseService):
             .values(
                 credits_charged=charged,
                 credits_shortfall=shortfall,
-                whatsapp_checks=checks,
+                whatsapp_checks=active_whatsapp,
             )
         )
 
@@ -432,8 +438,8 @@ class LeadResultsService(BaseService):
             "lead_search.settled",
             run_id=run.id,
             user_id=run.user_id,
-            companies=companies,
-            whatsapp_checks=checks,
+            verified_contacts=verified_contacts,
+            active_whatsapp=active_whatsapp,
             charged=charged,
             shortfall=shortfall,
         )
@@ -441,7 +447,8 @@ class LeadResultsService(BaseService):
         return Settlement(
             charged=charged,
             shortfall=shortfall,
-            whatsapp_checks=checks,
+            verified_contacts=verified_contacts,
+            active_whatsapp=active_whatsapp,
             billed=total_credits(lines),
         )
 

@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.models.lead import Company
-from app.services.billing_catalog import COMPANY_RESULT_CREDITS, SEARCH_RUN_CREDITS
+from app.services.billing_catalog import BASE_CONTACT_CREDIT
 from tests.api.test_auth import PREFIX as AUTH_PREFIX
 from tests.api.test_auth import register, signed_in_tokens, verify
 from tests.api.test_dashboard import _company, _mock_n8n
@@ -155,8 +155,9 @@ async def test_figures_are_real_counts_of_the_users_rows(
     assert totals["email_rate"] == 100.0
     assert totals["contacts_per_search"] == 3.0
 
-    # Settled from what actually came back: run fee plus one charge per company.
-    expected_spend = SEARCH_RUN_CREDITS + 2 * COMPANY_RESULT_CREDITS
+    # Settled from what actually came back: 10 credits per verified-email
+    # contact, no run fee or company charge.
+    expected_spend = 3 * BASE_CONTACT_CREDIT
     assert totals["credits_spent"] == expected_spend
     assert totals["credits_per_lead"] == round(expected_spend / 2, 1)
 

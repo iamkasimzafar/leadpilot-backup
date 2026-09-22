@@ -80,9 +80,9 @@ def _patched_start(monkeypatch, sink: list[dict]) -> None:
 # --- The price ---------------------------------------------------------------
 
 
-def test_a_check_costs_eight_credits() -> None:
+def test_a_check_costs_five_credits() -> None:
     """The n8n workflow bills per lookup at this rate."""
-    assert WHATSAPP_VALIDATION_CREDITS == 8
+    assert WHATSAPP_VALIDATION_CREDITS == 5
 
 
 # --- Request validation ------------------------------------------------------
@@ -109,9 +109,9 @@ async def test_flag_and_price_reach_the_webhook(monkeypatch) -> None:
 
     assert payload["validate_whatsapp"] is True
     # The price travels with the flag so the workflow can report the charge.
-    assert payload["whatsapp_credits_per_check"] == 8
+    assert payload["whatsapp_credits_per_check"] == 5
     assert result.validate_whatsapp is True
-    assert result.whatsapp_credits_per_check == 8
+    assert result.whatsapp_credits_per_check == 5
 
 
 async def test_opting_out_sends_false_and_no_price(monkeypatch) -> None:
@@ -140,7 +140,7 @@ async def test_whatsapp_travels_with_the_other_targeting(monkeypatch) -> None:
     assert payload["country"] == "de"
     assert payload["contact_role"] == "c_level"
     assert payload["validate_whatsapp"] is True
-    assert payload["whatsapp_credits_per_check"] == 8
+    assert payload["whatsapp_credits_per_check"] == 5
 
 
 # --- Persistence -------------------------------------------------------------
@@ -162,7 +162,7 @@ async def test_flag_is_stored_on_the_run(
 
     assert response.status_code == 200, response.text
     assert response.json()["validate_whatsapp"] is True
-    assert response.json()["whatsapp_credits_per_check"] == 8
+    assert response.json()["whatsapp_credits_per_check"] == 5
 
     run = (await db_session.execute(select(LeadSearchRun))).scalars().first()
     assert run.validate_whatsapp is True

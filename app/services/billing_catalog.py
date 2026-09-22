@@ -38,22 +38,27 @@ class CreditPack:
 # --- Feature pricing ---------------------------------------------------------
 # What each AI/search action costs a user. Kept beside the plans so every price
 # in the product is declared in one file.
+# Charged immediately when the user clicks AI Expansion: they get the keyword
+# list back instantly, so this is billed at the click rather than settled
+# later like the search itself.
 AI_KEYWORD_EXPANSION_CREDITS = 5
 
-# Charged per phone number checked, not per search: the provider bills each
-# lookup, so a run's final cost depends on how many contacts carry a number.
-# The UI shows an estimate before dispatch and the workflow reports the real
-# count back.
-WHATSAPP_VALIDATION_CREDITS = 8
-
 # --- Lead search -------------------------------------------------------------
-# A search is charged once, when the workflow's results arrive successfully:
-# a flat run fee, plus a per-company rate for every company returned, plus the
-# WhatsApp rate above for every number checked (if validation was requested).
-# A run that fails, or never reports back, costs nothing. The maths lives in
-# services/search_pricing.py.
-SEARCH_RUN_CREDITS = 15
-COMPANY_RESULT_CREDITS = 25
+# There is no run fee and no per-company charge: finding a company shell costs
+# nothing. A search is billed once, when the workflow's results arrive
+# successfully, purely on the decision makers it actually turned up:
+#
+#   base fee    BASE_CONTACT_CREDIT x every decision maker with a verified
+#               email (email_status == "valid" and an email address present)
+#   WhatsApp    WHATSAPP_VALIDATION_CREDITS x every one of those contacts
+#               whose number came back Active on WhatsApp -- never charged
+#               for a number that was checked and came back not active, or
+#               never checked at all
+#
+# A run that fails, never reports back, or returns no verified email at all,
+# costs nothing. The maths lives in services/search_pricing.py.
+BASE_CONTACT_CREDIT = 10
+WHATSAPP_VALIDATION_CREDITS = 5
 
 # Starting assumptions for the pre-dispatch estimate, used until an account has
 # completed runs of its own to learn from.
@@ -90,13 +95,12 @@ PACKS: dict[str, CreditPack] = {
 
 __all__ = [
     "AI_KEYWORD_EXPANSION_CREDITS",
-    "COMPANY_RESULT_CREDITS",
+    "BASE_CONTACT_CREDIT",
     "CREDITS_PER_DOLLAR",
     "DEFAULT_COMPANIES_PER_KEYWORD",
     "DEFAULT_CONTACTS_PER_COMPANY",
     "PACKS",
     "PLANS",
-    "SEARCH_RUN_CREDITS",
     "WHATSAPP_VALIDATION_CREDITS",
     "BillingInterval",
     "CreditPack",

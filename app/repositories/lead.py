@@ -7,6 +7,13 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app.models.lead import Company, DecisionMaker, LeadStatus
 from app.repositories.base import BaseRepository
+from app.schemas.lead import WHATSAPP_ACTIVE
+
+# What a verified email looks like in the DB: an address is present and the
+# provider's own check passed. Case-insensitive because email_status is
+# whatever the provider sent, unlike whatsapp_status which is normalised on
+# the way in (see normalise_whatsapp_status).
+_EMAIL_VALID = "valid"
 
 # More words than this adds nothing a user would notice, and each one is
 # another pass over the contacts table.
@@ -286,18 +293,43 @@ class DecisionMakerRepository(BaseRepository[DecisionMaker]):
 
         return result.scalar_one()
 
-    async def count_whatsapp_checked_for_run(self, run_id: str) -> int:
-        """Contacts the workflow actually ran a WhatsApp check on.
+    async def count_verified_email_for_run(self, run_id: str) -> int:
+        """Decision makers this run found with a verified email.
 
-        A null status means no check happened -- no number to check, or
-        validation was off -- so those rows are not counted and not charged.
-        "Not Active" is a check that was made and is billed like any other.
+        The only thing the base fee is billed on: an address must be present
+        and the provider's own check must have passed. A company the workflow
+        looked at but that yielded no verified contact costs nothing.
         """
         stmt = (
             select(func.count())
             .select_from(DecisionMaker)
             .join(Company, Company.id == DecisionMaker.company_id)
-            .where(Company.run_id == run_id, DecisionMaker.whatsapp_status.is_not(None))
+            .where(
+                Company.run_id == run_id,
+                DecisionMaker.verified_email.is_not(None),
+                func.lower(DecisionMaker.email_status) == _EMAIL_VALID,
+            )
+        )
+        result = await self.db.execute(stmt)
+
+        return result.scalar_one()
+
+    async def count_active_whatsapp_for_run(self, run_id: str) -> int:
+        """Verified-email contacts whose number came back Active on WhatsApp.
+
+        Only a positive result is billed: a number checked and found not
+        active, or never checked at all, costs nothing extra.
+        """
+        stmt = (
+            select(func.count())
+            .select_from(DecisionMaker)
+            .join(Company, Company.id == DecisionMaker.company_id)
+            .where(
+                Company.run_id == run_id,
+                DecisionMaker.verified_email.is_not(None),
+                func.lower(DecisionMaker.email_status) == _EMAIL_VALID,
+                DecisionMaker.whatsapp_status == WHATSAPP_ACTIVE,
+            )
         )
         result = await self.db.execute(stmt)
 

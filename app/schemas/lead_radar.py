@@ -17,6 +17,21 @@ SearchTypeLiteral = Literal["b2b", "local"]
 # list; it also keeps the `subtypes` query string a sane length.
 MAX_BUSINESS_CATEGORIES = 10
 
+# B2B search takes several keyword tags at once (see lead-radar.vue's tag
+# input), all expanded together into one combined list of up to ~30 AI terms
+# (keyword_expansion.py's MAX_SYNONYMS + MAX_SCENARIOS + MAX_TRANSLATIONS) --
+# comfortable headroom over that for the terms actually selected and sent on.
+MAX_EXPANDED_KEYWORDS = 60
+
+# How many keyword tags a single search (and a single /expand call) can take.
+MAX_KEYWORD_TAGS = 5
+
+# `original_keyword` now carries every typed tag joined with ", " (the
+# frontend caps at 5 tags), not a single keyword -- 120 was sized for one.
+# Capped at the DB column's own limit (SearchRun.original_keyword is
+# String(255) in app/models/lead_search.py) rather than past it.
+MAX_ORIGINAL_KEYWORD_LENGTH = 255
+
 
 def _normalise_contact_role(value: str | None) -> str | None:
     """Blank means "any role" (no Snov.io filter); an unknown code is refused."""
@@ -68,10 +83,27 @@ TermType = Literal["synonym", "scenario", "lang"]
 
 
 class ExpandKeywordRequest(BaseModel):
-    keyword: str = Field(min_length=1, max_length=120)
+    # One or more root keyword tags from the search box, expanded together
+    # into a single combined list of terms (see KeywordExpansionService) --
+    # not one AI call per tag, so the 25-30 term budget is shared across all
+    # of them rather than each tag getting its own.
+    keywords: list[str] = Field(min_length=1, max_length=MAX_KEYWORD_TAGS)
 
     # Which kind of buyer to aim the expansion at. None expands broadly.
     company_type: str | None = Field(default=None, max_length=32)
+
+    @field_validator("keywords")
+    @classmethod
+    def _clean_keywords(cls, value: list[str]) -> list[str]:
+        cleaned = [" ".join(k.split()) for k in value]
+        cleaned = [k for k in cleaned if k]
+        if not cleaned:
+            raise ValueError("At least one keyword is required.")
+        for k in cleaned:
+            if len(k) > 120:
+                raise ValueError("Each keyword must be 120 characters or fewer.")
+
+        return cleaned
 
     @field_validator("company_type")
     @classmethod
@@ -90,10 +122,14 @@ class ExpandedTerm(BaseModel):
 
 
 class StartSearchRequest(BaseModel):
-    original_keyword: str = Field(min_length=1, max_length=120)
+    original_keyword: str = Field(
+        min_length=1, max_length=MAX_ORIGINAL_KEYWORD_LENGTH
+    )
     # The terms the user ticked in step 2. The original keyword is prepended
     # server-side, so the client sends only the selected expansions.
-    expanded_keywords: list[str] = Field(default_factory=list, max_length=40)
+    expanded_keywords: list[str] = Field(
+        default_factory=list, max_length=MAX_EXPANDED_KEYWORDS
+    )
     auto_add_to_leads: bool = True
 
     # SerpApi `gl` code (https://serpapi.com/google-countries), lower-case.
@@ -286,13 +322,17 @@ class QuoteRequest(BaseModel):
     on screen can then never disagree with the decision to allow the search.
     """
 
-    original_keyword: str = Field(min_length=1, max_length=120)
-    expanded_keywords: list[str] = Field(default_factory=list, max_length=40)
+    original_keyword: str = Field(
+        min_length=1, max_length=MAX_ORIGINAL_KEYWORD_LENGTH
+    )
+    expanded_keywords: list[str] = Field(
+        default_factory=list, max_length=MAX_EXPANDED_KEYWORDS
+    )
     validate_whatsapp: bool = False
 
 
 class QuoteLine(BaseModel):
-    """One line of the estimate: run_fee, companies or whatsapp."""
+    """One line of the estimate: contacts or whatsapp."""
 
     key: str
     units: int
@@ -324,8 +364,7 @@ class SearchQuote(BaseModel):
     based_on_history: bool
     runs_sampled: int
     # The rates, so the UI never hardcodes a price.
-    run_fee_credits: int
-    company_credits: int
+    contact_credits: int
     whatsapp_credits: int
 
 
@@ -503,20 +542,29 @@ class ProgressCallbackRequest(BaseModel):
 
 
 class ExpandKeywordResponse(BaseModel):
-    # False when the input is not a usable product / industry keyword
-    # (gibberish, a sentence, a person's name, ...).
+    # False when NONE of the submitted keywords are usable product / industry
+    # terms (gibberish, a sentence, a person's name, ...). True as long as at
+    # least one of several keywords is usable -- the rest are just dropped
+    # from the expansion (see `rejected_keywords`).
     valid: bool
-    # Credits taken for this call: the AI expansion price on success, 0 when the
-    # keyword was rejected (nothing was produced, so nothing is charged).
+    # Credits taken for this call: the AI expansion price on success, 0 when
+    # every keyword was rejected (nothing was produced, so nothing is charged).
+    # Flat per call, not per keyword -- expanding several tags together costs
+    # the same as expanding one.
     credits_charged: int = 0
     # The wallet balance after the charge, so the UI can update without a
     # second round trip. None when nothing was charged.
     balance_after: int | None = None
-    # What the model understood the keyword to mean, in English. Lets the UI
-    # show the interpretation for non-English or ambiguous input.
+    # What the model understood the keyword(s) to mean, in English, joined
+    # with ", " when there were several. Lets the UI show the interpretation
+    # for non-English or ambiguous input.
     normalized_keyword: str | None = None
-    # Human-readable explanation when valid is False.
+    # Human-readable explanation when valid is False (every keyword rejected).
     reason: str | None = None
     # Suggested real keywords the user may have meant when valid is False.
     suggestions: list[str] = Field(default_factory=list)
+    # Keywords that were dropped as not real product/industry terms while at
+    # least one other keyword in the same request was usable -- so the UI can
+    # tell the user a tag was silently excluded rather than just losing it.
+    rejected_keywords: list[str] = Field(default_factory=list)
     terms: list[ExpandedTerm] = Field(default_factory=list)

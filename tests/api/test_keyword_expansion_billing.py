@@ -101,7 +101,9 @@ async def test_successful_expansion_charges_five_credits(
     headers = await _headers(client, db_session)
     await _subscribe(client, headers)
 
-    response = await client.post(EXPAND, json={"keyword": "LED screen"}, headers=headers)
+    response = await client.post(
+        EXPAND, json={"keywords": ["LED screen"]}, headers=headers
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -120,7 +122,7 @@ async def test_each_expansion_charges_again(
 
     for expected in (485, 480, 475):
         response = await client.post(
-            EXPAND, json={"keyword": "LED screen"}, headers=headers
+            EXPAND, json={"keywords": ["LED screen"]}, headers=headers
         )
         assert response.json()["balance_after"] == expected
 
@@ -133,7 +135,7 @@ async def test_the_charge_appears_in_credit_history(
     _mock_deepseek(monkeypatch, reply=VALID_REPLY)
     headers = await _headers(client, db_session)
     await _subscribe(client, headers)
-    await client.post(EXPAND, json={"keyword": "LED screen"}, headers=headers)
+    await client.post(EXPAND, json={"keywords": ["LED screen"]}, headers=headers)
 
     response = await client.get(f"{BILLING}/transactions", headers=headers)
 
@@ -155,7 +157,9 @@ async def test_a_rejected_keyword_is_not_charged(
     headers = await _headers(client, db_session)
     await _subscribe(client, headers)
 
-    response = await client.post(EXPAND, json={"keyword": "asdfghjkl"}, headers=headers)
+    response = await client.post(
+        EXPAND, json={"keywords": ["asdfghjkl"]}, headers=headers
+    )
 
     assert response.status_code == 200
     body = response.json()
@@ -172,7 +176,9 @@ async def test_an_upstream_failure_is_not_charged(
     headers = await _headers(client, db_session)
     await _subscribe(client, headers)
 
-    response = await client.post(EXPAND, json={"keyword": "LED screen"}, headers=headers)
+    response = await client.post(
+        EXPAND, json={"keywords": ["LED screen"]}, headers=headers
+    )
 
     assert response.status_code == 502
     assert await _balance(client, headers) == 490
@@ -186,7 +192,9 @@ async def test_input_without_letters_is_not_charged(
     headers = await _headers(client, db_session)
     await _subscribe(client, headers)
 
-    response = await client.post(EXPAND, json={"keyword": "12345 !!!"}, headers=headers)
+    response = await client.post(
+        EXPAND, json={"keywords": ["12345 !!!"]}, headers=headers
+    )
 
     assert response.status_code == 200
     assert response.json()["valid"] is False
@@ -204,7 +212,9 @@ async def test_expansion_is_refused_with_an_empty_wallet(
     calls = _mock_deepseek(monkeypatch, reply=VALID_REPLY)
     headers = await _headers(client, db_session)
 
-    response = await client.post(EXPAND, json={"keyword": "LED screen"}, headers=headers)
+    response = await client.post(
+        EXPAND, json={"keywords": ["LED screen"]}, headers=headers
+    )
 
     assert response.status_code == 402
     body = response.json()
@@ -230,7 +240,9 @@ async def test_expansion_is_refused_when_the_balance_is_short(
     await BillingService(db_session).spend(subscription.user_id, 487, "Test drain")
     assert await _balance(client, headers) == 3
 
-    response = await client.post(EXPAND, json={"keyword": "LED screen"}, headers=headers)
+    response = await client.post(
+        EXPAND, json={"keywords": ["LED screen"]}, headers=headers
+    )
 
     assert response.status_code == 402
     assert response.json()["error"]["details"] == {"balance": 3, "required": 5}
@@ -239,6 +251,6 @@ async def test_expansion_is_refused_when_the_balance_is_short(
 
 
 async def test_expansion_requires_auth(client: AsyncClient) -> None:
-    response = await client.post(EXPAND, json={"keyword": "LED screen"})
+    response = await client.post(EXPAND, json={"keywords": ["LED screen"]})
 
     assert response.status_code == 401

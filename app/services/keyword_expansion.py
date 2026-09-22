@@ -1,11 +1,15 @@
 """AI keyword expansion for Lead Radar, backed by DeepSeek.
 
-One chat completion does two jobs: it decides whether the input is a real
-product / industry keyword at all (random characters, chat messages and the like
-are turned away with an explanation instead of producing nonsense), and for valid input it
-returns synonyms, buyer scenarios and translations. The model is forced into
-JSON mode and its answer is validated with pydantic before anything reaches the
-client, so a malformed reply becomes a clean 502 rather than a crash.
+One chat completion does two jobs: it decides which of the submitted keywords
+are real product / industry keywords at all (random characters, chat messages
+and the like are turned away with an explanation instead of producing
+nonsense), and for the usable ones it returns ONE combined set of synonyms,
+buyer scenarios and translations covering all of them together -- the search
+box takes several keyword tags at once, but the AI expansion budget (25-30
+terms) is shared across the whole batch, not multiplied per tag. The model is
+forced into JSON mode and its answer is validated with pydantic before
+anything reaches the client, so a malformed reply becomes a clean 502 rather
+than a crash.
 """
 
 import json
@@ -23,69 +27,110 @@ from app.services.company_types import name_for, prompt_hint_for
 
 log = get_logger(__name__)
 
-# Hard caps so a chatty model can't flood the UI.
-MAX_SYNONYMS = 6
-MAX_SCENARIOS = 5
-MAX_TRANSLATIONS = 6
+# Hard caps so a chatty model can't flood the UI -- 25-30 terms TOTAL across
+# every keyword in the request, not per keyword: 10 + 10 + 10 = 30 at most,
+# covering however many keywords were submitted together.
+MAX_SYNONYMS = 10
+MAX_SCENARIOS = 10
+MAX_TRANSLATIONS = 10
 MAX_SUGGESTIONS = 4
 MAX_TERM_LENGTH = 60
 
 SYSTEM_PROMPT = """You are a B2B export lead-generation keyword expert. A user of a \
-lead-finding tool types a product, service or industry keyword. Your job has two steps.
+lead-finding tool types one or more product, service or industry keywords at once (as \
+separate tags). Your job has two steps.
 
-STEP 1 - VALIDATE. Decide whether the input is a genuine product, service, material, \
-equipment or industry keyword that a sales team could use to find buyer companies. \
-Accept keywords in any language (English and Chinese are most common), including \
-technical terms, HS-code style descriptions, and common misspellings of real products \
-(treat "LED screena" as "LED screen"). REJECT the input when it is:
+STEP 1 - VALIDATE EACH KEYWORD. For every keyword in the "Keywords" list, decide \
+whether it is a genuine product, service, material, equipment or industry keyword that \
+a sales team could use to find buyer companies. Accept keywords in any language \
+(English and Chinese are most common), including technical terms, HS-code style \
+descriptions, and common misspellings of real products (treat "LED screena" as "LED \
+screen"). REJECT a keyword when it is:
 - random, repeated or keyboard-mashed characters that form no real word in any language
 - a greeting, question, sentence, command or chat message
 - a person's name, a single pronoun, a number, or a generic word with no product meaning
 - offensive content or something unrelated to commerce
-When rejecting, explain in one short, friendly sentence why it cannot be used, and \
-ALWAYS fill "suggestions" with exactly 4 real product keywords the user could search \
-instead. If the input resembles a real product (a typo, a partial word, a vague \
-category), suggest the closest matching products. Otherwise suggest 4 varied, \
-commonly traded products from different industries as examples. Never return an \
-empty "suggestions" array for invalid input.
+List every rejected keyword in "rejected_keywords" with a one-sentence friendly reason \
+each. A keyword not listed there is accepted. If ALL keywords are rejected, also set \
+"valid" to false and ALWAYS fill "suggestions" with exactly 4 real product keywords the \
+user could search instead (the closest matches to what was typed if it resembles a real \
+product, otherwise 4 varied, commonly traded products from different industries). If at \
+least one keyword is accepted, set "valid" to true and leave "suggestions" empty --  \
+proceed to Step 2 using only the accepted keywords.
 
-STEP 2 - EXPAND (only when valid). Produce search terms a lead-generation engine \
-would use to find companies that BUY or USE the product:
-- "normalized_keyword": the keyword in clean English (fix typos, translate if needed).
-- "synonyms": 4 to 6 alternative names for the same product as used in international \
-trade and product catalogues. Real, commonly used terms only.
-- "scenarios": 3 to 5 application, use-case or buyer-segment phrases describing WHERE \
-the product is used or WHO buys it (e.g. for "LED screen": "Stadium display", \
-"Mall video wall", "Outdoor advertising screen", "Indoor LED screen buyer").
-- "translations": the core keyword in Spanish (ES), German (DE), French (FR), \
-Italian (IT) and Portuguese (PT). If the input was not in English, add English (EN) \
-first. Use the natural term a native buyer would search, not a literal word-for-word \
-translation.
+STEP 2 - EXPAND (using every accepted keyword together). Produce ONE combined set of 25 \
+to 30 high-quality search terms a lead-generation engine would use to find companies \
+that BUY or USE the accepted products -- this budget is shared across ALL accepted \
+keywords in this request, not given separately to each one (2 accepted keywords might \
+split it roughly 15/15, or unevenly if one product has far more real variants than the \
+other -- use judgement, but the combined total across every category must land in the \
+25-30 range and cover every accepted keyword with at least a few terms each). This is a \
+HARD REQUIREMENT: a short, safe list is a bad answer even if every term is correct. All \
+three of the following categories are REQUIRED in every valid response -- never skip or \
+shortchange one to pad another:
+- "synonyms": 8 to 10 alternative names for the accepted products, as used in \
+international trade, customs/HS-code descriptions, and product catalogues. Include \
+general trade terms, more technical/industry-jargon terms, and looser everyday terms \
+buyers actually type -- real, commonly used variants only, not invented ones. Draw from \
+every accepted keyword, not just the first one.
+- "scenarios": 8 to 10 application, use-case or buyer-segment phrases describing WHERE \
+the accepted products are used, WHO buys them, or for WHAT project (e.g. for "LED \
+display": "Stadium LED display", "Mall video wall", "Outdoor advertising screen", \
+"Airport digital signage", "Retail storefront display", "Concert stage screen", \
+"Control room video wall", "Church LED screen"). Vary the venue/industry across the \
+full list -- do not produce near-duplicates of the same scenario, and cover every \
+accepted keyword's own use cases, not only one product's.
+- "translations": the accepted keyword(s) in AT LEAST 8 different languages combined, \
+and it MUST include German (DE), Spanish (ES) and French (FR) every time -- never omit \
+these three. Fill the rest from: Italian (IT), Portuguese (PT), Dutch (NL), Polish \
+(PL), Turkish (TR), Arabic (AR), Russian (RU), Japanese (JA), Korean (KO), Vietnamese \
+(VI), Indonesian (ID), Thai (TH). If an accepted keyword was not in English, add its \
+English form (EN) first, before the rest. Use the natural term a native buyer in that \
+market would actually search, not a literal word-for-word translation. With several \
+accepted keywords, translate the main/first one unless the others need their own \
+distinct translation to stay recognisable.
+- "normalized_keyword": every accepted keyword in clean English (fix typos, translate \
+if needed), joined with ", " if there is more than one.
 
 Rules: every term must be short (2-5 words), specific, and different from the others. \
-Never repeat the original keyword. No explanations inside terms. Title-case English \
-terms like a product name ("Digital signage"), keep other languages natural.
+Never repeat an accepted keyword verbatim, and never repeat a synonym as a scenario or \
+vice versa. No explanations inside terms. Title-case English terms like a product name \
+("Digital signage"), keep other languages natural. Before answering, count each array: \
+if "synonyms" or "scenarios" has fewer than 8 entries, or "translations" has fewer than \
+8 entries or is missing DE, ES or FR, add more before replying. Never exceed 10 in any \
+one category, and never let the combined total across all three pass 30.
 
 TARGET BUYER. The user may tell you which kind of company they want to find, as a \
-"Target company type" line after the keyword. When they do, bias every synonym and \
+"Target company type" line after the keywords. When they do, bias every synonym and \
 especially every scenario towards the words THAT kind of company uses when searching \
 or describing itself, so the terms become Google queries that surface those companies \
-rather than the general market. Keep the terms about the product and its buyers; do \
+rather than the general market. Keep the terms about the products and their buyers; do \
 not simply append the company type to each term. When no target company type is \
 given, cover the market broadly as usual.
 
 Reply with a single JSON object and nothing else, in exactly this shape:
 {
   "valid": true,
-  "normalized_keyword": "LED screen",
+  "normalized_keyword": "LED screen, Digital signage",
   "reason": null,
   "suggestions": [],
-  "synonyms": ["..."],
-  "scenarios": ["..."],
-  "translations": [{"lang": "ES", "term": "Pantalla LED"}]
+  "rejected_keywords": [{"keyword": "asdf123", "reason": "..."}],
+  "synonyms": ["...", "...", "... (8-10 total, combined across all accepted keywords)"],
+  "scenarios": ["...", "...", "... (8-10 total, combined across all accepted keywords)"],
+  "translations": [
+    {"lang": "DE", "term": "LED-Anzeige"},
+    {"lang": "ES", "term": "Pantalla LED"},
+    {"lang": "FR", "term": "Ecran LED"},
+    {"lang": "...", "term": "... (8+ total, DE/ES/FR always included)"}
+  ]
 }
-For invalid input set "valid" to false, fill "reason" and "suggestions", and leave \
-the other arrays empty."""
+When EVERY keyword is rejected, set "valid" to false, fill "reason" (the main reason, \
+covering the rejected keywords) and "suggestions", and leave the other arrays empty."""
+
+
+class _RejectedKeyword(BaseModel):
+    keyword: str
+    reason: str = ""
 
 
 class _Translation(BaseModel):
@@ -101,6 +146,7 @@ class _ModelReply(BaseModel):
     normalized_keyword: str | None = None
     reason: str | None = None
     suggestions: list[str] = Field(default_factory=list)
+    rejected_keywords: list[_RejectedKeyword] = Field(default_factory=list)
     synonyms: list[str] = Field(default_factory=list)
     scenarios: list[str] = Field(default_factory=list)
     translations: list[_Translation] = Field(default_factory=list)
@@ -119,13 +165,20 @@ class KeywordExpansionService:
         self._client = client
 
     async def expand(
-        self, keyword: str, company_type: str | None = None
+        self, keywords: list[str], company_type: str | None = None
     ) -> ExpandKeywordResponse:
-        keyword = _clean(keyword)
+        """Expand one or more keyword tags together into a single combined
+        list of up to 30 terms. Costs one flat charge for the whole batch,
+        not one per keyword -- see the /expand route."""
+        cleaned = [_clean(k) for k in keywords]
+        cleaned = [k for k in cleaned if k]
 
-        # Cheap local guard: nothing to send if there is not a single letter or
-        # CJK character in the input.
-        if not re.search(r"[^\W\d_]", keyword):
+        # Cheap local guard, applied per keyword: drop anything with not a
+        # single letter or CJK character before it ever reaches the model.
+        local_rejects = [k for k in cleaned if not re.search(r"[^\W\d_]", k)]
+        usable = [k for k in cleaned if k not in local_rejects]
+
+        if not usable:
             return ExpandKeywordResponse(
                 valid=False,
                 reason="Please enter a product or industry keyword, "
@@ -138,19 +191,19 @@ class KeywordExpansionService:
                 "AI keyword expansion is not configured on this server."
             )
 
-        reply = await self._ask_model(keyword, company_type)
-        return self._to_response(keyword, reply)
+        reply = await self._ask_model(usable, company_type)
+        return self._to_response(usable, reply, pre_rejected=local_rejects)
 
     # --- DeepSeek call --------------------------------------------------------
 
     @staticmethod
-    def _user_message(keyword: str, company_type: str | None) -> str:
-        """The user turn: the keyword, plus who we are trying to reach.
+    def _user_message(keywords: list[str], company_type: str | None) -> str:
+        """The user turn: the keyword tags, plus who we are trying to reach.
 
         The company type is expanded into its description rather than sent as a
         bare code, so the model is told what that kind of buyer actually is.
         """
-        lines = [f"Keyword: {keyword}"]
+        lines = ["Keywords:"] + [f"- {k}" for k in keywords]
 
         hint = prompt_hint_for(company_type) if company_type else None
         if hint:
@@ -160,7 +213,7 @@ class KeywordExpansionService:
         return "\n".join(lines)
 
     async def _ask_model(
-        self, keyword: str, company_type: str | None = None
+        self, keywords: list[str], company_type: str | None = None
     ) -> _ModelReply:
         body = {
             "model": settings.DEEPSEEK_MODEL,
@@ -168,14 +221,17 @@ class KeywordExpansionService:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": self._user_message(keyword, company_type),
+                    "content": self._user_message(keywords, company_type),
                 },
             ],
             # DeepSeek's JSON mode: guarantees parseable output as long as the
             # prompt mentions JSON (it does).
             "response_format": {"type": "json_object"},
             "temperature": 0.4,
-            "max_tokens": 900,
+            # The combined reply (up to 30 terms plus per-keyword rejection
+            # reasons) needs real headroom -- a truncated JSON reply fails
+            # parsing and surfaces as a 502 rather than a partial result.
+            "max_tokens": 1600,
         }
         headers = {"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}"}
         url = f"{settings.DEEPSEEK_BASE_URL.rstrip('/')}/chat/completions"
@@ -187,7 +243,7 @@ class KeywordExpansionService:
                 async with httpx.AsyncClient(timeout=settings.DEEPSEEK_TIMEOUT) as client:
                     response = await client.post(url, json=body, headers=headers)
         except httpx.TimeoutException as exc:
-            log.warning("keyword_expansion.timeout", keyword=keyword)
+            log.warning("keyword_expansion.timeout", keywords=keywords)
             raise UpstreamError(
                 "The AI service took too long to answer. Try again."
             ) from exc
@@ -239,20 +295,54 @@ class KeywordExpansionService:
     # --- Post-processing ------------------------------------------------------
 
     @staticmethod
-    def _to_response(keyword: str, reply: _ModelReply) -> ExpandKeywordResponse:
-        if not reply.valid:
+    def _to_response(
+        keywords: list[str],
+        reply: _ModelReply,
+        *,
+        pre_rejected: list[str] | None = None,
+    ) -> ExpandKeywordResponse:
+        """`keywords` is what was actually sent to the model (the local guard
+        in `expand()` already dropped anything with no letters at all --
+        those come back in `pre_rejected` so they still show up to the user
+        as rejected, same as one the model itself turned down)."""
+        pre_rejected = pre_rejected or []
+
+        # Keyed case-insensitively: the model may not echo a keyword's exact
+        # casing back, and a mismatch here would silently un-reject it.
+        model_rejected = {
+            _clean(r.keyword).casefold(): _clean(r.reason)
+            for r in reply.rejected_keywords
+        }
+
+        # The model can only judge what it was actually sent, so a keyword it
+        # never mentions was implicitly accepted -- same rule the prompt uses.
+        accepted = [k for k in keywords if k.casefold() not in model_rejected]
+
+        # Display casing follows what the user actually typed (`keywords`),
+        # not however the model happened to echo it back.
+        all_rejected = dict.fromkeys(pre_rejected, "")
+        all_rejected.update(
+            {k: model_rejected[k.casefold()] for k in keywords if k not in accepted}
+        )
+
+        # Every keyword rejected, whether by the local guard or the model.
+        if not reply.valid or not accepted:
+            reason = _clean(reply.reason or "") or next(
+                (r for r in all_rejected.values() if r), ""
+            )
             return ExpandKeywordResponse(
                 valid=False,
                 normalized_keyword=None,
-                reason=_clean(reply.reason or "")
+                reason=reason
                 or "That doesn't look like a product or industry keyword.",
                 suggestions=_dedupe(
-                    reply.suggestions, MAX_SUGGESTIONS, exclude={keyword}
+                    reply.suggestions, MAX_SUGGESTIONS, exclude=set(keywords)
                 ),
+                rejected_keywords=sorted(all_rejected),
             )
 
-        exclude = {keyword}
-        normalized = _clean(reply.normalized_keyword or "") or keyword
+        exclude = set(accepted)
+        normalized = _clean(reply.normalized_keyword or "") or ", ".join(accepted)
         exclude.add(normalized)
 
         synonyms = _dedupe(reply.synonyms, MAX_SYNONYMS, exclude)
@@ -269,7 +359,19 @@ class KeywordExpansionService:
         # here, not the normalized form.
         seen_terms = {e.casefold() for e in exclude if e != normalized}
         seen_langs: set[str] = set()
-        for tr in reply.translations:
+
+        # DE, ES and FR are a hard requirement (see SYSTEM_PROMPT), so they go
+        # first regardless of where the model placed them -- otherwise a
+        # chatty reply could push one past MAX_TRANSLATIONS before it is seen.
+        priority_langs = ("DE", "ES", "FR")
+        ordered_translations = sorted(
+            reply.translations,
+            key=lambda tr: priority_langs.index(tr.lang.strip().upper()[:2])
+            if tr.lang.strip().upper()[:2] in priority_langs
+            else len(priority_langs),
+        )
+
+        for tr in ordered_translations:
             term = _clean(tr.term)
             lang = tr.lang.strip().upper()[:2]
             key = term.casefold()
@@ -289,11 +391,27 @@ class KeywordExpansionService:
         if not terms:
             # The model said "valid" but gave us nothing usable. Treat it as
             # upstream trouble rather than showing an empty step 2.
-            log.error("keyword_expansion.empty_result", keyword=keyword)
+            log.error("keyword_expansion.empty_result", keywords=accepted)
             raise UpstreamError("The AI service returned no usable terms. Try again.")
 
+        # The prompt requires DE/ES/FR every time; not worth failing the
+        # request over (English is still a fully usable expansion), but worth
+        # knowing about if the model is drifting from the instruction.
+        missing_required_langs = set(priority_langs) - seen_langs
+        if missing_required_langs:
+            log.warning(
+                "keyword_expansion.missing_required_langs",
+                keywords=accepted,
+                missing=sorted(missing_required_langs),
+            )
+
         return ExpandKeywordResponse(
-            valid=True, normalized_keyword=normalized, terms=terms
+            valid=True,
+            normalized_keyword=normalized,
+            terms=terms,
+            # Keywords dropped even though at least one other was usable --
+            # both the local guard's and the model's own rejections.
+            rejected_keywords=sorted(all_rejected),
         )
 
 

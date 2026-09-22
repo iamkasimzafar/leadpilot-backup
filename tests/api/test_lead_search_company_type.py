@@ -122,14 +122,16 @@ def test_search_request_rejects_an_unknown_type() -> None:
 
 
 def test_expand_request_validates_the_type_too() -> None:
-    assert ExpandKeywordRequest(keyword="led screen").company_type is None
+    assert ExpandKeywordRequest(keywords=["led screen"]).company_type is None
     assert (
-        ExpandKeywordRequest(keyword="led screen", company_type="brand_oem").company_type
+        ExpandKeywordRequest(
+            keywords=["led screen"], company_type="brand_oem"
+        ).company_type
         == "brand_oem"
     )
 
     with pytest.raises(ValueError, match="Unknown company type"):
-        ExpandKeywordRequest(keyword="led screen", company_type="farmer")
+        ExpandKeywordRequest(keywords=["led screen"], company_type="farmer")
 
 
 async def test_api_rejects_an_unknown_type(client: AsyncClient, db_session) -> None:
@@ -152,7 +154,7 @@ async def test_company_type_reaches_the_deepseek_prompt(monkeypatch) -> None:
     sent: list[dict] = []
 
     async with _deepseek_client(sent, VALID_REPLY) as http:
-        await KeywordExpansionService(http).expand("led screen", "distributor")
+        await KeywordExpansionService(http).expand(["led screen"], "distributor")
 
     user_message = sent[0]["messages"][1]["content"]
 
@@ -169,7 +171,7 @@ async def test_each_type_sends_its_own_description(monkeypatch) -> None:
     for code in COMPANY_TYPES:
         sent: list[dict] = []
         async with _deepseek_client(sent, VALID_REPLY) as http:
-            await KeywordExpansionService(http).expand("led screen", code)
+            await KeywordExpansionService(http).expand(["led screen"], code)
 
         message = sent[0]["messages"][1]["content"]
         assert name_for(code) in message
@@ -181,11 +183,11 @@ async def test_no_company_type_leaves_the_prompt_unchanged(monkeypatch) -> None:
     sent: list[dict] = []
 
     async with _deepseek_client(sent, VALID_REPLY) as http:
-        await KeywordExpansionService(http).expand("led screen")
+        await KeywordExpansionService(http).expand(["led screen"])
 
     user_message = sent[0]["messages"][1]["content"]
 
-    assert user_message == "Keyword: led screen"
+    assert user_message == "Keywords:\n- led screen"
     assert "Target company type" not in user_message
 
 
@@ -195,7 +197,7 @@ async def test_system_prompt_explains_how_to_use_the_target(monkeypatch) -> None
     sent: list[dict] = []
 
     async with _deepseek_client(sent, VALID_REPLY) as http:
-        await KeywordExpansionService(http).expand("led screen", "retailer")
+        await KeywordExpansionService(http).expand(["led screen"], "retailer")
 
     system_message = sent[0]["messages"][0]["content"]
 
@@ -207,7 +209,7 @@ async def test_expansion_still_works_with_a_type(monkeypatch) -> None:
     sent: list[dict] = []
 
     async with _deepseek_client(sent, VALID_REPLY) as http:
-        result = await KeywordExpansionService(http).expand("led screen", "installer")
+        result = await KeywordExpansionService(http).expand(["led screen"], "installer")
 
     assert result.valid
     assert [term.term for term in result.terms][:2] == ["LED display", "Video wall"]

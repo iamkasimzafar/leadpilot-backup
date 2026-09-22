@@ -86,15 +86,23 @@ def _mock_n8n(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 def _contact(name: str, status: Any) -> dict[str, Any]:
-    return {"full_name": name, "phone_number": "+17185550100", "whatsapp_status": status}
+    return {
+        "full_name": name,
+        "phone_number": "+17185550100",
+        "verified_email": f"{name.lower().replace(' ', '.')}@example.com",
+        "email_status": "valid",
+        "whatsapp_status": status,
+    }
 
 
-async def test_unchecked_numbers_are_neither_shown_as_reachable_nor_billed(
+async def test_only_an_active_number_is_shown_as_reachable_or_billed(
     client: AsyncClient, db_session: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The bug this guards: a workflow that could not read its validator's
     output labelled every contact "Not Checked". That is not null, so the UI
-    showed all of them as on WhatsApp and the run was billed a check each."""
+    showed all of them as on WhatsApp. Separately: only a number that came
+    back Active is a premium worth paying for -- "Not Active" is billed no
+    differently from never having been checked at all."""
     captured = _mock_n8n(monkeypatch)
     tokens = await signed_in_tokens(client, db_session)
     headers = {"Authorization": f"Bearer {tokens['access_token']}"}
@@ -159,6 +167,9 @@ async def test_unchecked_numbers_are_neither_shown_as_reachable_nor_billed(
         "Skipped": None,
     }
 
-    # Two checks were really made, so two are billed -- not four.
+    # Only "On It" came back Active; "Not On It" was checked but is not a
+    # premium, and the other two were never checked at all.
     run = await client.get(f"{PREFIX}/lead-radar/runs/{run_id}", headers=headers)
-    assert run.json()["whatsapp_checks"] == 2
+    body = run.json()
+    assert body["whatsapp_checks"] == 1
+    assert body["credits_charged"] == 4 * 10 + 1 * 5

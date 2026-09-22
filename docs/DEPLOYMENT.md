@@ -171,16 +171,25 @@ No registry secret is needed: Actions publishes to ghcr.io with its own
 
 ### Let the server pull the image
 
-A private repo's images are private too. Either make the package public
-(**Packages → leadpilot_backend → Package settings → Change visibility**), or
-give the server a read-only token:
+A private repo's images are private too, so the VM needs credentials. Use a
+token scoped to nothing but reading packages — the repo stays private and the
+token cannot touch the source.
 
-1. GitHub → **Settings → Developer settings → Personal access tokens → Tokens (classic)**
-2. Scope: `read:packages` only
-3. Add it as the repo secret `GHCR_TOKEN`
+1. **https://github.com/settings/tokens** → **Tokens (classic)** →
+   **Generate new token (classic)**
+2. Note: `LeadPilot VM pull`. Expiration: your call — a year is reasonable.
+3. Scopes: tick **`read:packages`** and nothing else.
+4. Copy the token (`ghp_...`; GitHub shows it once) and add it as the repo
+   secret **`GHCR_TOKEN`**.
+
+That single scope is the point: if the VM is ever compromised, the token pulls
+images and does nothing else — no source, no pushes, no other repositories.
 
 The workflow uses `GHCR_TOKEN` when present and falls back to the built-in
-token otherwise.
+`GITHUB_TOKEN` otherwise, so nothing else needs changing.
+
+> Note the expiry. A token that lapses makes deploys fail with `denied`
+> months later, which is a confusing symptom if you have forgotten it exists.
 
 ---
 
@@ -192,7 +201,9 @@ The first one is manual, because nothing is running yet to restart:
 cd /www/leadpilot-api
 echo "LEADPILOT_IMAGE=ghcr.io/shabir0786/leadpilot_backend:latest" > .env.deploy
 
-echo "<GHCR_TOKEN>" | docker login ghcr.io -u <your-github-username> --password-stdin
+# Once only: Docker saves this in ~/.docker/config.json, and the automated
+# deploys log in again themselves.
+echo "<GHCR_TOKEN>" | docker login ghcr.io -u SHABIR0786 --password-stdin
 docker compose --env-file .env.deploy pull api
 
 # Creates the schema. Safe to re-run; it is a no-op when already current.
@@ -336,8 +347,14 @@ not `@'localhost'`.
 
 **`denied` when pulling the image**
 
-The package is private and the server has no token. Make it public or set
-`GHCR_TOKEN` (see above), then `docker login ghcr.io` again.
+The server cannot authenticate to the registry. Either `GHCR_TOKEN` is not
+set as a repo secret, or the token has expired — classic tokens do, silently,
+and the symptom appears months after it was created. Generate a new one with
+`read:packages`, update the secret, and on the VM:
+
+```bash
+echo "<new token>" | docker login ghcr.io -u SHABIR0786 --password-stdin
+```
 
 **The deploy succeeds but the health check fails**
 

@@ -1,20 +1,25 @@
 """What a lead search costs, and how the estimate is made.
 
-The bill has three lines (rates in billing_catalog):
+The bill has up to two lines (rates in billing_catalog):
 
-  run fee     SEARCH_RUN_CREDITS, flat, once per run
-  companies   COMPANY_RESULT_CREDITS x every company the workflow returned
-  WhatsApp    WHATSAPP_VALIDATION_CREDITS x every number actually checked,
-              only when the run asked for validation, and regardless of
-              whether the number turned out to be on WhatsApp
+  base fee    BASE_CONTACT_CREDIT x every decision maker with a verified
+              email -- a verified email means email_status == "valid" and an
+              actual address; nothing else is billable
+  WhatsApp    WHATSAPP_VALIDATION_CREDITS x every one of those contacts whose
+              number came back Active on WhatsApp. Never charged for a number
+              that was checked and found not active, nor for one never
+              checked at all -- only a positive result is a premium worth
+              paying for.
 
-Nothing is taken at dispatch. The whole amount is charged once, when the
+There is no run fee and no per-company charge: a company with no verified
+contact costs nothing, however many the workflow had to look through to find
+it. Nothing is taken at dispatch. The whole amount is charged once, when the
 results callback reports success -- see LeadResultsService.ingest. A run that
 fails, or whose results never arrive, costs nothing.
 
-Two of the three lines depend on what the workflow finds, so the amount is not
-known until the end. The quote produced here is the pre-dispatch estimate: it
-lets the user see the likely cost, and it is what the start gate checks the
+Both lines depend on what the workflow finds, so the amount is not known
+until the end. The quote produced here is the pre-dispatch estimate: it lets
+the user see the likely cost, and it is what the start gate checks the
 balance against, so nobody launches a search their balance could not cover.
 """
 
@@ -26,10 +31,9 @@ from app.repositories.lead_search import LeadSearchRunRepository
 from app.schemas.lead_radar import QuoteLine, SearchQuote
 from app.services.base import BaseService
 from app.services.billing_catalog import (
-    COMPANY_RESULT_CREDITS,
+    BASE_CONTACT_CREDIT,
     DEFAULT_COMPANIES_PER_KEYWORD,
     DEFAULT_CONTACTS_PER_COMPANY,
-    SEARCH_RUN_CREDITS,
     WHATSAPP_VALIDATION_CREDITS,
 )
 
@@ -51,32 +55,29 @@ class CostLine:
         return self.units * self.unit_credits
 
 
-def cost_lines(
-    *, companies: int, whatsapp_checks: int, validate_whatsapp: bool
-) -> list[CostLine]:
-    """The bill for a run that found `companies` and checked `whatsapp_checks`
-    numbers. Used for both the estimate and the real settlement, so the two
+def cost_lines(*, verified_contacts: int, active_whatsapp: int) -> list[CostLine]:
+    """The bill for a run that found `verified_contacts` decision makers with
+    a verified email, `active_whatsapp` of which came back Active on
+    WhatsApp. Used for both the estimate and the real settlement, so the two
     can never drift apart."""
-    lines = [CostLine("run_fee", "Lead search — run fee", 1, SEARCH_RUN_CREDITS)]
+    lines: list[CostLine] = []
 
-    if companies > 0:
+    if verified_contacts > 0:
         lines.append(
             CostLine(
-                "companies",
-                f"Lead search — {companies:,} companies found",
-                companies,
-                COMPANY_RESULT_CREDITS,
+                "contacts",
+                f"Lead search — {verified_contacts:,} verified emails found",
+                verified_contacts,
+                BASE_CONTACT_CREDIT,
             )
         )
 
-    # Only charged when the user asked for validation. A workflow that reports
-    # a status it was not asked for is not a reason to bill.
-    if validate_whatsapp and whatsapp_checks > 0:
+    if active_whatsapp > 0:
         lines.append(
             CostLine(
                 "whatsapp",
-                f"Lead search — {whatsapp_checks:,} WhatsApp checks",
-                whatsapp_checks,
+                f"Lead search — {active_whatsapp:,} active WhatsApps found",
+                active_whatsapp,
                 WHATSAPP_VALIDATION_CREDITS,
             )
         )
@@ -139,28 +140,40 @@ class SearchPricingService(BaseService):
         validate_whatsapp: bool,
         balance: int,
     ) -> SearchQuote:
-        """The pre-dispatch estimate for a search of `keyword_count` terms."""
+        """The pre-dispatch estimate for a search of `keyword_count` terms.
+
+        Companies and contacts are still estimated from history to size the
+        run for the user, but only verified-email contacts are billable, and
+        the estimate has no way to know in advance how many of those will
+        turn out valid or Active on WhatsApp. It assumes every estimated
+        contact will carry a verified email (the same "assume the best case
+        that still bounds the bill" approach the old per-company estimate
+        used), and, when validation was requested, that all of them come back
+        Active -- the true upper bound the start gate must be able to cover.
+        """
         assumptions = await self.assumptions_for(user_id)
 
-        # At least one company, or the per-company line would read as free.
+        # At least one company, or the estimate would read as free.
         estimated_companies = (
             max(1, round(keyword_count * assumptions.companies_per_keyword))
             if keyword_count > 0
             else 0
         )
 
-        # Every contact is assumed to carry a number, so this is an upper
-        # bound; the real count is whatever the workflow actually checked.
-        estimated_checks = (
+        estimated_contacts = (
             round(estimated_companies * assumptions.contacts_per_company)
-            if validate_whatsapp
+            if estimated_companies > 0
             else 0
         )
 
+        # Every contact is assumed to carry a number and come back Active,
+        # so this is an upper bound; the real count is whatever the workflow
+        # actually found.
+        estimated_active_whatsapp = estimated_contacts if validate_whatsapp else 0
+
         lines = cost_lines(
-            companies=estimated_companies,
-            whatsapp_checks=estimated_checks,
-            validate_whatsapp=validate_whatsapp,
+            verified_contacts=estimated_contacts,
+            active_whatsapp=estimated_active_whatsapp,
         )
         total = total_credits(lines)
 
@@ -168,7 +181,7 @@ class SearchPricingService(BaseService):
             keyword_count=keyword_count,
             validate_whatsapp=validate_whatsapp,
             estimated_companies=estimated_companies,
-            estimated_whatsapp_checks=estimated_checks,
+            estimated_whatsapp_checks=estimated_active_whatsapp,
             lines=[
                 QuoteLine(
                     key=line.key,
@@ -184,8 +197,7 @@ class SearchPricingService(BaseService):
             shortfall=max(0, total - balance),
             based_on_history=assumptions.from_history,
             runs_sampled=assumptions.runs_sampled,
-            run_fee_credits=SEARCH_RUN_CREDITS,
-            company_credits=COMPANY_RESULT_CREDITS,
+            contact_credits=BASE_CONTACT_CREDIT,
             whatsapp_credits=WHATSAPP_VALIDATION_CREDITS,
         )
 

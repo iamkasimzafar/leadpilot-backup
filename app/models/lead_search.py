@@ -188,7 +188,10 @@ class LeadSearchRun(Base, TimestampMixin):
     # been billed: still running, failed, or its results never came.
     # `credits_shortfall` is the part of the bill the balance could not cover
     # (the wallet cannot go below zero), kept so the run can show what it cost
-    # and what is still owed. `whatsapp_checks` is the count that was billed.
+    # and what is still owed. `whatsapp_checks` is the number of verified-email
+    # contacts that came back Active on WhatsApp -- the only WhatsApp count
+    # that was actually billed (a name kept from when every check, active or
+    # not, was billable).
     credits_charged: Mapped[int] = mapped_column(
         Integer, default=0, server_default="0", nullable=False
     )

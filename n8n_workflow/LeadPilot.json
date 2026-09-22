@@ -10,10 +10,10 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.1,
       "position": [
-        -336,
-        -208
+        2464,
+        2416
       ],
-      "id": "20e81e2b-2a38-4d51-ad60-a181fc6ac0e7",
+      "id": "c71a9ecb-1856-4937-9b1c-7cbf7b6d6113",
       "name": "Webhook",
       "webhookId": "7f163f15-d960-4911-9eef-1959b0d6bf86"
     },
@@ -25,10 +25,10 @@
       "type": "n8n-nodes-base.splitOut",
       "typeVersion": 1,
       "position": [
-        -48,
-        -192
+        2752,
+        2432
       ],
-      "id": "e61cb14b-4665-4d0e-97b8-25141c9e45e8",
+      "id": "8f9c8881-5a5d-4168-b6ba-dd57056ef8f3",
       "name": "Split Out"
     },
     {
@@ -50,21 +50,21 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"q\": \"{{ $json['body.expanded_keywords'] }}\",\n  \"gl\": \"{{ $('Webhook').item.json.body.country }}\",\n  \"num\": 50\n}",
+        "jsonBody": "={{\nJSON.stringify((() => {\n  const keyword = $json['body.expanded_keywords'];\n  const companyType = $('Webhook').item.json.body.company_type;\n\n  // Company-type -> OR-group of search terms buyers of that type use.\n  // Keep in step with LeadPilot_Backend/app/services/company_types.py.\n  const typeTerms = {\n    distributor: ['distributor', 'wholesaler', 'importer', 'trading company', 'stockist'],\n    brand_oem: ['OEM', 'ODM', 'custom manufacturer', 'private label', 'contract manufacturer'],\n    retailer: ['retailer', 'store', 'shop', 'dropshipping', 'reseller'],\n    installer: ['installer', 'contractor', 'system integrator', 'commissioning', 'maintenance']\n  };\n\n  const terms = typeTerms[companyType];\n  const q = terms\n    ? `${keyword} (${terms.map(t => `\"${t}\"`).join(' OR ')})`\n    : keyword;\n\n  return {\n    q,\n    gl: $('Webhook').item.json.body.country,\n    num: 50\n  };\n})())\n}}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        304,
-        -192
+        3104,
+        2432
       ],
-      "id": "66a58427-c1bc-44e7-adc6-4a3a7f0c9348",
+      "id": "2a68ba1c-9e2c-4321-b99c-fc4de7f18a24",
       "name": "serper",
       "retryOnFail": true,
       "waitBetweenTries": 3000,
-      "onError": "continueRegularOutput",
-      "maxTries": 3
+      "maxTries": 3,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -73,10 +73,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        560,
-        -192
+        3360,
+        2432
       ],
-      "id": "f25e069f-7a69-4e4f-8a70-71c056f0e252",
+      "id": "1295c1c9-2f47-4d69-ae4e-3f8f4bc652ec",
       "name": "Backlisting"
     },
     {
@@ -88,10 +88,10 @@
       "type": "n8n-nodes-base.removeDuplicates",
       "typeVersion": 2,
       "position": [
-        752,
-        -192
+        3552,
+        2432
       ],
-      "id": "81153377-d61e-4252-b505-7d6e4f255e4e",
+      "id": "43d04008-27f1-4fa5-b4a9-1175b3e4dc29",
       "name": "Remove Duplicates"
     },
     {
@@ -109,7 +109,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{\nJSON.stringify({\n  \"model\": \"deepseek-chat\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": `You are a B2B data analyst. Review the search result (URL, Title, Snippet).\n\nDetermine:\n1. Is this a legitimate, independent company website (NOT a directory, marketplace, blog, or news site)?\n2. Does it match the Target Company Type: \"${$('Webhook').first().json.body.company_type_name || $('Webhook').first().json.company_type_name || 'Any'}\"?\n3. Does it match the Target Company Size: \"${$('Webhook').first().json.body.company_size_name || $('Webhook').first().json.company_size_name || 'Any'}\"?\n\nRate overall relevance to the keyword on a scale of 1 to 10.\nReturn strictly JSON format: {\"score\": [1-10], \"is_company\": true/false}`\n    },\n    {\n      \"role\": \"user\",\n      \"content\": `Original Keyword: ${$json.original_keyword || $('Webhook').first().json.body.original_keyword}\\nURL: ${$json.url || $json.link}\\nTitle: ${$json.title}\\nSnippet: ${$json.snippet}`\n    }\n  ],\n  \"response_format\": { \"type\": \"json_object\" }\n})\n}}",
+        "jsonBody": "={{\nJSON.stringify({\n  \"model\": \"deepseek-chat\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": `You are a B2B data analyst. Review the search result (URL, Title, Snippet).\n\nDetermine: Is this a legitimate, independent B2B company website (NOT a directory, marketplace, blog, news site, or social media profile)?\n\nCompany Type and Company Size are already targeted upstream, in the search query and in later filtering steps -- do not try to judge them here from a short snippet.\n\nRate overall relevance to the keyword on a scale of 1 to 10.\nReturn strictly JSON format: {\"score\": [1-10], \"is_company\": true/false}`\n    },\n    {\n      \"role\": \"user\",\n      \"content\": `Original Keyword: ${$json.original_keyword || $('Webhook').first().json.body.original_keyword}\\nURL: ${$json.url || $json.link}\\nTitle: ${$json.title}\\nSnippet: ${$json.snippet}`\n    }\n  ],\n  \"response_format\": { \"type\": \"json_object\" }\n})\n}}",
         "options": {
           "batching": {
             "batch": {
@@ -121,10 +121,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        976,
-        -192
+        3776,
+        2432
       ],
-      "id": "0835e098-1891-42e5-8c7a-e412b87fe286",
+      "id": "c8d767f5-d880-4bdc-bcfc-46d5563c8aba",
       "name": "HTTP Request",
       "retryOnFail": true,
       "waitBetweenTries": 3000,
@@ -137,10 +137,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1200,
-        -192
+        4000,
+        2432
       ],
-      "id": "da82e08d-0fc8-4fad-9ccf-3bda48c362ac",
+      "id": "fd433327-b149-436c-b5f4-98a2a2b5f8ba",
       "name": "Parse DeepSeek Response"
     },
     {
@@ -156,7 +156,7 @@
             {
               "id": "b1d37335-dd15-478b-bbf9-7ae570e66407",
               "leftValue": "={{ $json.ai_score }}",
-              "rightValue": 7,
+              "rightValue": 5,
               "operator": {
                 "type": "number",
                 "operation": "gte"
@@ -179,10 +179,10 @@
       "type": "n8n-nodes-base.filter",
       "typeVersion": 2.3,
       "position": [
-        1456,
-        -192
+        4256,
+        2432
       ],
-      "id": "f73173a0-319c-44ce-8dd6-8566b82ec84e",
+      "id": "fd9e5aa1-83e6-424c-ae64-70d35edeb039",
       "name": "Filter",
       "alwaysOutputData": true
     },
@@ -193,20 +193,20 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        1936,
-        -208
+        4736,
+        2416
       ],
-      "id": "ce665396-8b62-4f9b-b491-8cb8ea15aa25",
+      "id": "fb761a66-e074-48f2-8661-0a98c3a9cf22",
       "name": "Start domain search",
       "retryOnFail": true,
       "waitBetweenTries": 2000,
+      "maxTries": 3,
       "credentials": {
         "snovioApi": {
           "id": "uqvwWpTnbjCZIPv3",
           "name": "Snov.io account"
         }
-      },
-      "maxTries": 3
+      }
     },
     {
       "parameters": {
@@ -215,10 +215,10 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        2160,
-        -208
+        4960,
+        2416
       ],
-      "id": "4b17af55-ac71-4651-913f-de5520b9b6a7",
+      "id": "a215d062-c520-4b95-a248-32acf2401226",
       "name": "Wait",
       "webhookId": "ae8f5566-1dd8-4e61-be6f-11d2db1c7bd6"
     },
@@ -230,20 +230,20 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        2384,
-        -208
+        5184,
+        2416
       ],
-      "id": "8a6c21b5-bd27-4239-9fff-4b533e45beb0",
+      "id": "9b0105f1-a045-4f5e-b8ab-eea473b840ec",
       "name": "Get domain search result",
       "retryOnFail": true,
       "waitBetweenTries": 2000,
+      "maxTries": 3,
       "credentials": {
         "snovioApi": {
           "id": "uqvwWpTnbjCZIPv3",
           "name": "Snov.io account"
         }
-      },
-      "maxTries": 3
+      }
     },
     {
       "parameters": {
@@ -254,20 +254,20 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        2752,
-        -208
+        5552,
+        2416
       ],
-      "id": "1f79ac98-2447-4071-8e88-fabcd9a57282",
+      "id": "097e5b6f-1481-478c-a4f9-4a9cf9838e29",
       "name": "Start prospect profiles",
       "retryOnFail": true,
       "waitBetweenTries": 2000,
+      "maxTries": 3,
       "credentials": {
         "snovioApi": {
           "id": "uqvwWpTnbjCZIPv3",
           "name": "Snov.io account"
         }
-      },
-      "maxTries": 3
+      }
     },
     {
       "parameters": {
@@ -276,10 +276,10 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        2928,
-        -192
+        5728,
+        2432
       ],
-      "id": "c9a75270-af98-4166-a81f-bbf5e50e5abd",
+      "id": "46e72eaf-8a95-4006-9552-9e5161a9f474",
       "name": "Wait1",
       "webhookId": "d2d11e33-f8ff-45ba-b591-b5a86df6393a"
     },
@@ -291,20 +291,20 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        3136,
-        -208
+        5936,
+        2416
       ],
-      "id": "b68ce519-a65b-41ab-b1bd-9082ba2d1388",
+      "id": "fbfa1aec-d5de-463a-8625-0d28db3b033e",
       "name": "Get prospect profiles result",
       "retryOnFail": true,
       "waitBetweenTries": 2000,
+      "maxTries": 3,
       "credentials": {
         "snovioApi": {
           "id": "uqvwWpTnbjCZIPv3",
           "name": "Snov.io account"
         }
-      },
-      "maxTries": 3
+      }
     },
     {
       "parameters": {
@@ -314,20 +314,20 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        3984,
-        -224
+        6784,
+        2400
       ],
-      "id": "bce1dbc5-107a-4464-ae21-efcf3a945cbf",
+      "id": "3735f7a6-9e71-49dd-857e-98ab256631b8",
       "name": "Start prospects emails",
       "retryOnFail": true,
       "waitBetweenTries": 2000,
+      "maxTries": 3,
       "credentials": {
         "snovioApi": {
           "id": "uqvwWpTnbjCZIPv3",
           "name": "Snov.io account"
         }
-      },
-      "maxTries": 3
+      }
     },
     {
       "parameters": {
@@ -337,10 +337,10 @@
       "type": "n8n-nodes-base.splitOut",
       "typeVersion": 1,
       "position": [
-        3760,
-        -224
+        6560,
+        2400
       ],
-      "id": "ad723879-28b2-454d-827e-bf121cc3e28a",
+      "id": "70dfbaae-5e18-49a3-8df2-184b49d31ceb",
       "name": "Split Out1"
     },
     {
@@ -350,10 +350,10 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        4144,
-        -224
+        6944,
+        2400
       ],
-      "id": "34acc6a6-6c9b-4f55-9baf-90b824f90e95",
+      "id": "6621f3e6-353c-4069-9061-cc48ef677d65",
       "name": "Wait2",
       "webhookId": "2eaf0b40-c140-4dab-929f-46b0aec95da3"
     },
@@ -365,20 +365,20 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        4352,
-        -224
+        7152,
+        2400
       ],
-      "id": "7d095309-2b6e-4b07-9c97-2fbba1cd8466",
+      "id": "bd47392a-60ac-42fb-8a9c-ce6aadcbb938",
       "name": "Get prospect email search result",
       "retryOnFail": true,
       "waitBetweenTries": 2000,
+      "maxTries": 3,
       "credentials": {
         "snovioApi": {
           "id": "uqvwWpTnbjCZIPv3",
           "name": "Snov.io account"
         }
-      },
-      "maxTries": 3
+      }
     },
     {
       "parameters": {
@@ -465,10 +465,10 @@
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.4,
       "position": [
-        4576,
-        -224
+        7376,
+        2400
       ],
-      "id": "51e924c4-ca21-4393-bb5e-2e2d4d7942de",
+      "id": "f7b24686-42d5-46d8-a60c-5847a0770c69",
       "name": "Switch",
       "alwaysOutputData": false,
       "notesInFlow": false
@@ -481,30 +481,30 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        4896,
-        -192
+        7696,
+        2432
       ],
-      "id": "90f92382-fa19-45af-97f3-dd5685e2a842",
+      "id": "052d2ae0-5b18-46bc-800e-15b7d3306414",
       "name": "Start email verification",
       "retryOnFail": true,
       "waitBetweenTries": 2000,
+      "maxTries": 3,
       "credentials": {
         "snovioApi": {
           "id": "uqvwWpTnbjCZIPv3",
           "name": "Snov.io account"
         }
-      },
-      "maxTries": 3
+      }
     },
     {
       "parameters": {},
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        5072,
-        -192
+        7872,
+        2432
       ],
-      "id": "08b4d7bb-84fb-4170-9fc4-f322195ce3b2",
+      "id": "194235ce-3600-41f4-9b5b-f257f7c7b5fd",
       "name": "Wait3",
       "webhookId": "c87c305c-32f3-4c79-b35c-1dc9f485a729"
     },
@@ -517,20 +517,20 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        5296,
-        -208
+        8096,
+        2416
       ],
-      "id": "768ab62e-a43b-4815-b15d-da42ee789e31",
+      "id": "9dd43be6-25a6-4687-b5d1-d5c01b856cef",
       "name": "Get email verification result",
       "retryOnFail": true,
       "waitBetweenTries": 2000,
+      "maxTries": 3,
       "credentials": {
         "snovioApi": {
           "id": "uqvwWpTnbjCZIPv3",
           "name": "Snov.io account"
         }
-      },
-      "maxTries": 3
+      }
     },
     {
       "parameters": {
@@ -559,10 +559,10 @@
       "type": "n8n-nodes-base.filter",
       "typeVersion": 2.3,
       "position": [
-        5488,
-        -192
+        8288,
+        2432
       ],
-      "id": "94c4585c-4ab5-4316-9585-b87f4ab0b50b",
+      "id": "186785d1-9ff0-4f4c-9864-0c24ca314e9f",
       "name": "Keep Only Valid",
       "alwaysOutputData": true
     },
@@ -571,10 +571,10 @@
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3.2,
       "position": [
-        5776,
-        -336
+        8576,
+        2288
       ],
-      "id": "e42b558e-87e7-4c20-a636-ef2f2f4f0a93",
+      "id": "9f522130-be9a-4588-af66-22838fd97506",
       "name": "Merge",
       "alwaysOutputData": true
     },
@@ -614,10 +614,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        7200,
-        -448
+        10000,
+        2176
       ],
-      "id": "f2f62a0c-c5ae-4bc5-80e9-23de69647365",
+      "id": "b42cc73a-d2d3-4a7e-a872-9a190cb0bd6e",
       "name": "WhatsApp Validator",
       "retryOnFail": true,
       "waitBetweenTries": 3000
@@ -629,10 +629,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        6736,
-        -352
+        9536,
+        2272
       ],
-      "id": "6b813a29-35db-4050-96c1-4a0f36349516",
+      "id": "65e001f5-0663-4e7e-9015-342e716064b9",
       "name": "Remove duplicate"
     },
     {
@@ -656,10 +656,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        704,
-        -560
+        3504,
+        2064
       ],
-      "id": "180dadc1-b8cb-4012-b367-21263b88c506",
+      "id": "046e520a-eff7-4d93-b6f0-0ba2750485f3",
       "name": "searching companies",
       "retryOnFail": true,
       "executeOnce": true,
@@ -686,10 +686,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        1600,
-        -560
+        4400,
+        2064
       ],
-      "id": "2c5de302-0326-4000-8060-2f54bc2a539b",
+      "id": "895c520c-bfbd-4743-86fa-7fd26b88c540",
       "name": "AI Analysing",
       "retryOnFail": true,
       "executeOnce": true,
@@ -716,10 +716,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        2528,
-        -800
+        5328,
+        1824
       ],
-      "id": "ca51c446-4b6e-4698-b8fd-4fb57f8c0f18",
+      "id": "2325ddf2-7783-463c-8b1d-6c4cfac02d66",
       "name": "Domain Search",
       "retryOnFail": true,
       "executeOnce": true,
@@ -746,10 +746,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        3552,
-        -896
+        6352,
+        1728
       ],
-      "id": "05b54c6d-279b-4248-9315-b1d0ecfc19c0",
+      "id": "225e6d38-0cf8-4882-a4d5-65c094cc9854",
       "name": "Finding Decision Makers",
       "retryOnFail": true,
       "executeOnce": true,
@@ -776,10 +776,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        4816,
-        -816
+        7616,
+        1808
       ],
-      "id": "3641c282-3f4e-478b-9747-4106e6804ce0",
+      "id": "59034e7d-8584-4497-b118-d3ee7ea8f4c1",
       "name": "Finding Emails",
       "retryOnFail": true,
       "executeOnce": true,
@@ -806,10 +806,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        6112,
-        -912
+        8912,
+        1712
       ],
-      "id": "c8a2691f-719b-443e-bdf3-352b2b5b52be",
+      "id": "76c8e2f8-3783-420b-bba5-a1d3ea942f88",
       "name": "Verifying Contacts",
       "retryOnFail": true,
       "executeOnce": true,
@@ -822,10 +822,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        7456,
-        -336
+        10256,
+        2288
       ],
-      "id": "e8daed32-6242-475a-9e13-2f2a588b7948",
+      "id": "017fdbff-fe2d-49ad-a538-0127ff794526",
       "name": "Group Leads & Apply Abandon Rule"
     },
     {
@@ -849,10 +849,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        7680,
-        -336
+        10480,
+        2288
       ],
-      "id": "8a024bb9-f8ac-4766-b601-b8291a29a77c",
+      "id": "70264f9b-0880-4dd7-aea6-47972658c628",
       "name": "Send Results to Backend",
       "executeOnce": true,
       "retryOnFail": true,
@@ -861,28 +861,28 @@
     },
     {
       "parameters": {
-        "jsCode": "// 1. Retrieve target min/max boundaries from Webhook payload\nconst webhookData = $('Webhook').first().json;\nconst body = webhookData.body || webhookData;\n\nconst targetMin = body.company_size_min !== undefined && body.company_size_min !== null ? parseInt(body.company_size_min, 10) : null;\nconst targetMax = body.company_size_max !== undefined && body.company_size_max !== null ? parseInt(body.company_size_max, 10) : null;\n\n// Set your hard limit here to control costs\nconst MAX_COMPANIES = 30; \n\n// Helper function to parse size strings like \"11-50\", \"1-10\", \"501+\", \"11 - 50\"\nfunction parseSizeRange(sizeStr) {\n  if (!sizeStr || typeof sizeStr !== 'string') return null;\n\n  const numbers = sizeStr.match(/\\d+/g);\n  if (!numbers || numbers.length === 0) return null;\n\n  if (numbers.length === 1) {\n    const val = parseInt(numbers[0], 10);\n    return { min: val, max: val };\n  }\n\n  return {\n    min: parseInt(numbers[0], 10),\n    max: parseInt(numbers[1], 10)\n  };\n}\n\nconst keptItems = [];\n\nfor (const item of $input.all()) {\n  const companyData = item.json.data || item.json;\n  // Snov.io names this field differently across responses, and may send a number.\n  const rawSize = companyData.size ?? companyData.company_size ?? item.json.size ?? item.json.company_size ?? '';\n  const companySizeStr = String(rawSize).trim();\n\n  // RULE 1: If user selected \"any size\" (targets are null), allow ALL companies immediately\n  if (targetMin === null && targetMax === null) {\n    keptItems.push(item);\n    continue;\n  }\n\n  // RULE 2: Unknown size is KEPT. Snov.io has no employee count for most small\n  // businesses, which are exactly what a \"1-10\" search is after; discarding them\n  // made that band return nothing. Only a KNOWN size outside the range is dropped.\n  if (!companySizeStr || companySizeStr.toLowerCase() === \"n/a\") {\n    keptItems.push(item);\n    continue;\n  }\n\n  // Parse actual company size range\n  const actualRange = parseSizeRange(companySizeStr);\n\n  // A size we cannot read is unknown too: keep it rather than guess.\n  if (!actualRange) {\n    keptItems.push(item);\n    continue;\n  }\n\n  // Check strict range overlap\nconst aboveMin = targetMin === null || actualRange.max >= targetMin;\nconst belowMax = targetMax === null || actualRange.min <= targetMax;\nconst isWithinRange = aboveMin && belowMax;\n\n  if (isWithinRange) {\n    keptItems.push(item);\n  }\n}\n\nif (!keptItems.length) {\n  throw new Error(`LeadPilot Error: no_company_size_match - ${$input.all().length} companies were found but none matched the requested company size.`);\n}\nreturn keptItems.slice(0, MAX_COMPANIES);"
+        "jsCode": "// 1. Retrieve target min/max boundaries from Webhook payload\nconst webhookData = $('Webhook').first().json;\nconst body = webhookData.body || webhookData;\n\nconst targetMin = body.company_size_min !== undefined && body.company_size_min !== null ? parseInt(body.company_size_min, 10) : null;\nconst targetMax = body.company_size_max !== undefined && body.company_size_max !== null ? parseInt(body.company_size_max, 10) : null;\n\n// Set your hard limit here to control costs\nconst MAX_COMPANIES = 30; \n\n// Helper function to parse size strings like \"11-50\", \"1-10\", \"501+\", \"11 - 50\"\nfunction parseSizeRange(sizeStr) {\n  if (!sizeStr || typeof sizeStr !== 'string') return null;\n\n  const numbers = sizeStr.match(/\\d+/g);\n  if (!numbers || numbers.length === 0) return null;\n\n  if (numbers.length === 1) {\n    const val = parseInt(numbers[0], 10);\n    return { min: val, max: val };\n  }\n\n  return {\n    min: parseInt(numbers[0], 10),\n    max: parseInt(numbers[1], 10)\n  };\n}\n\nconst keptItems = [];\n\nfor (const item of $input.all()) {\n  const companyData = item.json.data || item.json;\n  const companySizeStr = companyData.size || item.json.size;\n\n  // RULE 1: If user selected \"any size\" (targets are null), allow ALL companies immediately\n  if (targetMin === null && targetMax === null) {\n    keptItems.push(item);\n    continue;\n  }\n\n  // RULE 2: Unknown size is not evidence of a bad fit -- Snov.io simply has no\n  // data for this company. Keep it rather than lose a possible hidden gem;\n  // only a confidently-parsed size can disqualify a company below.\n  if (!companySizeStr || companySizeStr.trim() === \"\" || companySizeStr.toLowerCase() === \"n/a\") {\n    keptItems.push(item);\n    continue;\n  }\n\n  // Parse actual company size range\n  const actualRange = parseSizeRange(companySizeStr);\n\n  // If size string could not be parsed into numbers, we are not confident it's\n  // out of range either -- keep it rather than discard on an unreadable value.\n  if (!actualRange) {\n    keptItems.push(item);\n    continue;\n  }\n\n  // Check strict range overlap. Only discard when Snov.io gave us a real,\n  // parsed size range that confidently falls outside the target.\nconst aboveMin = targetMin === null || actualRange.max >= targetMin;\nconst belowMax = targetMax === null || actualRange.min <= targetMax;\nconst isWithinRange = aboveMin && belowMax;\n\n  if (isWithinRange) {\n    keptItems.push(item);\n  }\n}\n\nif (!keptItems.length) {\n  throw new Error(`LeadPilot Error: no_company_size_match - ${$input.all().length} companies were found but none matched the requested company size.`);\n}\nreturn keptItems.slice(0, MAX_COMPANIES);"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2576,
-        -224
+        5376,
+        2400
       ],
-      "id": "c21d08a2-caef-44c1-b36a-02fe00d3ad7f",
+      "id": "cf9b4476-3a14-4a31-a388-482d30cc3540",
       "name": "Filter the companies"
     },
     {
       "parameters": {
-        "jsCode": "// --- CONFIGURABLE LIMITS ---\nconst MAX_PER_COMPANY = 5;       // Hard limit per domain\nconst MAX_TOTAL_PROSPECTS = 100; // Total output limit across all domains\n\nconst validRoles = [\n  \"ceo\", \"owner\", \"founder\", \"president\", \"director\", \"vp\", \n  \"vice president\", \"procurement\", \"buyer\", \"c-level\", \"chief\", \"managing\", \"partner\"\n];\n\nlet totalKept = 0;\nconst finalItems = [];\n\nfor (const item of $input.all()) {\n  if (totalKept >= MAX_TOTAL_PROSPECTS) break;\n\n  let prospectsArray = Array.isArray(item.json.data) ? item.json.data : \n                       Array.isArray(item.json.prospects) ? item.json.prospects : [];\n\n  // Skip companies that have no prospect data\n  if (!prospectsArray || prospectsArray.length === 0) {\n    continue; \n  }\n\n  // RULE 1: Strict Role Filtering\n  let qualifiedProspects = prospectsArray.filter(p => {\n    const title = (p.position || p.title || p.job_title || \"\").toLowerCase();\n    return validRoles.some(role => title.includes(role));\n  });\n\n  if (qualifiedProspects.length === 0) continue;\n\n  // RULE 2: Hard Limit Per Company\n  let slicedProspects = qualifiedProspects.slice(0, MAX_PER_COMPANY);\n\n  // RULE 3: Total Output Limit check\n  if (totalKept + slicedProspects.length > MAX_TOTAL_PROSPECTS) {\n    const roomLeft = MAX_TOTAL_PROSPECTS - totalKept;\n    slicedProspects = slicedProspects.slice(0, roomLeft);\n  }\n\n  totalKept += slicedProspects.length;\n\n  const newItem = { json: { ...item.json } };\n  newItem.json.data = slicedProspects; \n  finalItems.push(newItem);\n}\n\n// IF ZERO PROSPECTS FOUND ACROSS ALL COMPANIES, THROW ERROR TO TRIGGER ERROR WORKFLOW\nif (finalItems.length === 0 || totalKept === 0) {\n  throw new Error(\"LeadPilot Error: Zero decision-makers found matching target roles for any analyzed companies.\");\n}\n\nreturn finalItems;"
+        "jsCode": "// --- CONFIGURABLE LIMITS ---\nconst MAX_PER_COMPANY = 5;       // Hard limit per domain\nconst MAX_TOTAL_PROSPECTS = 100; // Total output limit across all domains\n\n// Snov.io's own 'positions' filter (see \"Start prospect profiles\") already did\n// the real role filtering when the user picked a specific role -- it was given\n// the exact job titles from CONTACT_ROLES (app/services/search_targeting.py)\n// and only returns matching prospects. This array is the safety net for the\n// \"any role\" case (no native filter applied, so every title comes through) and\n// for stray junk titles (interns, generic \"Info\", etc.) slipping past that. It\n// intentionally casts a much wider net than the 3 curated CONTACT_ROLES lists,\n// including seniority/function words and non-English equivalents, so valid\n// titles like \"Head of Sourcing\" or \"Einkaufsleiter\" are not discarded just\n// because they don't spell out \"CEO\" or \"Buyer\".\nconst validRoles = [\n  // C-level / ownership\n  \"ceo\", \"cfo\", \"coo\", \"cmo\", \"cto\", \"chief\", \"owner\", \"founder\", \"co-founder\",\n  \"president\", \"chairman\", \"chairwoman\", \"principal\", \"proprietor\", \"partner\",\n  // Management / leadership (any department)\n  \"director\", \"managing director\", \"general manager\", \"gm\", \"vp\", \"vice president\",\n  \"head of\", \"head\", \"lead\", \"manager\", \"management\", \"executive\", \"supervisor\",\n  \"administrator\", \"in charge\",\n  // Procurement / sourcing / supply chain\n  \"procurement\", \"purchasing\", \"purchase\", \"buyer\", \"buying\", \"sourcing\",\n  \"supply chain\", \"category manager\", \"vendor manager\", \"import\", \"export\",\n  // Sales / business development / operations (frequent decision-makers for B2B)\n  \"sales\", \"business development\", \"commercial\", \"operations\", \"ops\",\n  // Common non-English equivalents (DE/FR/ES/PT/IT) so translated titles survive\n  \"einkauf\", \"geschaeftsfuehrer\", \"geschäftsführer\", \"direttore\", \"responsabile\",\n  \"achat\", \"directeur\", \"gerente\", \"director general\", \"diretor\"\n];\n\nlet totalKept = 0;\nconst finalItems = [];\n\nfor (const item of $input.all()) {\n  if (totalKept >= MAX_TOTAL_PROSPECTS) break;\n\n  let prospectsArray = Array.isArray(item.json.data) ? item.json.data : \n                       Array.isArray(item.json.prospects) ? item.json.prospects : [];\n\n  // Skip companies that have no prospect data\n  if (!prospectsArray || prospectsArray.length === 0) {\n    continue; \n  }\n\n  // RULE 1: Role filtering -- a wide net of decision-maker keywords. Snov.io\n  // already applied the precise, user-selected role filter upstream when one\n  // was requested, so this only needs to catch obviously irrelevant titles\n  // (interns, generic support roles, etc.), not reproduce that exact match.\n  let qualifiedProspects = prospectsArray.filter(p => {\n    const title = (p.position || p.title || p.job_title || \"\").toLowerCase();\n    if (!title) return false;\n    return validRoles.some(role => title.includes(role));\n  });\n\n  if (qualifiedProspects.length === 0) continue;\n\n  // RULE 2: Hard Limit Per Company\n  let slicedProspects = qualifiedProspects.slice(0, MAX_PER_COMPANY);\n\n  // RULE 3: Total Output Limit check\n  if (totalKept + slicedProspects.length > MAX_TOTAL_PROSPECTS) {\n    const roomLeft = MAX_TOTAL_PROSPECTS - totalKept;\n    slicedProspects = slicedProspects.slice(0, roomLeft);\n  }\n\n  totalKept += slicedProspects.length;\n\n  const newItem = { json: { ...item.json } };\n  newItem.json.data = slicedProspects; \n  finalItems.push(newItem);\n}\n\n// IF ZERO PROSPECTS FOUND ACROSS ALL COMPANIES, THROW ERROR TO TRIGGER ERROR WORKFLOW\nif (finalItems.length === 0 || totalKept === 0) {\n  throw new Error(\"LeadPilot Error: Zero decision-makers found matching target roles for any analyzed companies.\");\n}\n\nreturn finalItems;"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3488,
-        -208
+        6288,
+        2416
       ],
-      "id": "b4a20b38-6f5e-4952-8b82-9e6d06b108d8",
+      "id": "c91c1765-2986-4f51-840a-958879f0eab8",
       "name": "Filter & Limit Prospects"
     },
     {
@@ -913,10 +913,10 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        6960,
-        -352
+        9760,
+        2272
       ],
-      "id": "a8e1ef84-2ec4-4279-9e7c-e0d778e37712",
+      "id": "28dfefca-9b16-40b4-8009-fdd12bd44a0c",
       "name": "If"
     },
     {
@@ -926,10 +926,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        6224,
-        -336
+        9024,
+        2288
       ],
-      "id": "2c015657-3f96-4817-a48d-4c63320701b5",
+      "id": "aaa2a71a-1e2b-4189-904d-1e19c491d5fa",
       "name": "Code in JavaScript"
     },
     {
@@ -939,25 +939,25 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1680,
-        -192
+        4480,
+        2432
       ],
-      "id": "6677ace6-e207-4873-be07-f832d37bb0ba",
+      "id": "30df59b2-1d82-4c1f-b702-fd96b44f2c77",
       "name": "Guard: AI Qualified",
       "executeOnce": true
     },
     {
       "parameters": {
-        "jsCode": "// The verifier answers { data: [ { email, result } ] }, but everything after\n// Merge expects the prospect record { data: { first_name, emails: [...] } }.\n// Put the verified status back on the original prospect (paired item through\n// Switch), so a verified email is a lead instead of being dropped.\nif (!$json.data || !Array.isArray($json.data) || !$json.data[0]) {\n  return { json: {} }; // the empty item from \"Always Output Data\"\n}\nconst prospect = JSON.parse(JSON.stringify($('Switch').item.json));\nconst verified = $json.data[0];\nif (prospect.data && Array.isArray(prospect.data.emails) && prospect.data.emails[0]) {\n  prospect.data.emails[0].smtp_status = (verified.result && verified.result.smtp_status) || 'valid';\n}\nreturn { json: prospect };\n",
-        "mode": "runOnceForEachItem"
+        "mode": "runOnceForEachItem",
+        "jsCode": "// The verifier answers { data: [ { email, result } ] }, but everything after\n// Merge expects the prospect record { data: { first_name, emails: [...] } }.\n// Put the verified status back on the original prospect (paired item through\n// Switch), so a verified email is a lead instead of being dropped.\nif (!$json.data || !Array.isArray($json.data) || !$json.data[0]) {\n  return { json: {} }; // the empty item from \"Always Output Data\"\n}\nconst prospect = JSON.parse(JSON.stringify($('Switch').item.json));\nconst verified = $json.data[0];\nif (prospect.data && Array.isArray(prospect.data.emails) && prospect.data.emails[0]) {\n  prospect.data.emails[0].smtp_status = (verified.result && verified.result.smtp_status) || 'valid';\n}\nreturn { json: prospect };\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        5664,
-        -240
+        8464,
+        2384
       ],
-      "id": "e6b8163d-092f-4ee4-be2a-5969645a8128",
+      "id": "0c17ac26-47af-433a-9149-22c86c2ea1b7",
       "name": "Restore Prospect",
       "executeOnce": true
     },
@@ -968,10 +968,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        6000,
-        -336
+        8800,
+        2288
       ],
-      "id": "8c3b7d1f-e732-4746-8117-4a6ecf67a698",
+      "id": "d40ce331-3ccb-47fe-8b74-5dd6ba09c345",
       "name": "Guard: Valid Emails"
     }
   ],
@@ -1411,10 +1411,9 @@
     "saveExecutionProgress": true,
     "callerPolicy": "workflowsFromSameOwner",
     "availableInMCP": false,
-    "errorWorkflow": "8jaVvfzmebEYKd5I",
-    "executionTimeout": 1800
+    "errorWorkflow": "8jaVvfzmebEYKd5I"
   },
-  "versionId": "e66a2935-c356-4ab3-86c5-75cc5748777b",
+  "versionId": "27192222-b373-4f55-8aef-b76b5a212319",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "637fc58fdfcd37c603408ad0e89fcc31830fb4ad32d730273f7b375c9871f3cb"

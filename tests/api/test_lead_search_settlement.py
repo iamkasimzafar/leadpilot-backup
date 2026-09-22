@@ -2,12 +2,14 @@
 
 The rules under test:
 
-  - run fee 15, plus 25 per company returned, plus 8 per WhatsApp number
-    checked (only if validation was requested; charged whether the number was
-    active or not)
+  - no run fee, no per-company charge: finding a company costs nothing
+  - 10 credits per decision maker found with a verified email
+    (email_status == "valid" and an address present)
+  - +5 credits on top of that, only for a verified contact whose number came
+    back Active on WhatsApp (only if validation was requested)
   - nothing is taken at dispatch; the bill is settled once, when the results
     callback reports success
-  - a failed run costs nothing
+  - a failed run, or one with no verified email at all, costs nothing
   - the results POST can be retried, so the charge must happen exactly once
   - the wallet cannot go negative: a bill the balance cannot cover is charged
     as far as it goes and the remainder recorded as a shortfall
@@ -24,10 +26,9 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.models.lead_search import LeadSearchRun
 from app.services.billing_catalog import (
-    COMPANY_RESULT_CREDITS,
+    BASE_CONTACT_CREDIT,
     DEFAULT_COMPANIES_PER_KEYWORD,
     DEFAULT_CONTACTS_PER_COMPANY,
-    SEARCH_RUN_CREDITS,
     WHATSAPP_VALIDATION_CREDITS,
 )
 from app.services.search_pricing import cost_lines, total_credits
@@ -138,54 +139,79 @@ async def _db_run(db_session: Any, run_id: str) -> LeadSearchRun:
     ).scalar_one()
 
 
+def _contact(
+    i: int, *, whatsapp_status: str | None = None, valid_email: bool = True
+) -> dict:
+    """One decision maker. `valid_email=False` gives it no billable email at
+    all (what a company with a non-verified contact looks like)."""
+    person: dict[str, Any] = {
+        "full_name": f"Person {i}",
+        "phone_number": f"+49 30 {1000 + i}",
+    }
+    if valid_email:
+        person["verified_email"] = f"person{i}@example.com"
+        person["email_status"] = "valid"
+    if whatsapp_status is not None:
+        person["whatsapp_status"] = whatsapp_status
+    return person
+
+
 def _companies(count: int, *, statuses: list[str | None] | None = None) -> list[dict]:
-    """`count` distinct companies. `statuses`, if given, becomes one contact per
-    entry on the first company, each with a phone number."""
-    companies = [
-        {"company_name": f"Company {i}", "website": f"company-{i}.example.com"}
+    """`count` distinct companies, each with one verified-email contact.
+
+    `statuses`, if given, replaces the whole set with a single company
+    carrying one contact per status instead -- `count` is then ignored, so
+    the caller's own count of verified contacts (`len(statuses)`) is exactly
+    what gets billed."""
+    if statuses is not None:
+        return [
+            {
+                "company_name": "Company 0",
+                "website": "company-0.example.com",
+                "decision_makers": [
+                    _contact(i, whatsapp_status=status)
+                    for i, status in enumerate(statuses)
+                ],
+            }
+        ]
+
+    return [
+        {
+            "company_name": f"Company {i}",
+            "website": f"company-{i}.example.com",
+            "decision_makers": [_contact(i)],
+        }
         for i in range(count)
     ]
-    if statuses is not None and companies:
-        companies[0]["decision_makers"] = [
-            {
-                "full_name": f"Person {i}",
-                "phone_number": f"+49 30 {1000 + i}",
-                "whatsapp_status": status,
-            }
-            for i, status in enumerate(statuses)
-        ]
-    return companies
 
 
 # --- The maths ---------------------------------------------------------------
 
 
 def test_the_rates() -> None:
-    assert SEARCH_RUN_CREDITS == 15
-    assert COMPANY_RESULT_CREDITS == 25
-    assert WHATSAPP_VALIDATION_CREDITS == 8
+    assert BASE_CONTACT_CREDIT == 10
+    assert WHATSAPP_VALIDATION_CREDITS == 5
 
 
-def test_a_bill_is_run_fee_plus_companies_plus_checks() -> None:
-    lines = cost_lines(companies=4, whatsapp_checks=3, validate_whatsapp=True)
+def test_a_bill_is_contacts_plus_whatsapp() -> None:
+    lines = cost_lines(verified_contacts=3, active_whatsapp=2)
 
-    assert [line.key for line in lines] == ["run_fee", "companies", "whatsapp"]
-    assert total_credits(lines) == 15 + 4 * 25 + 3 * 8
-
-
-def test_whatsapp_is_not_billed_unless_requested() -> None:
-    """A status the workflow reported anyway is not a reason to charge."""
-    lines = cost_lines(companies=4, whatsapp_checks=3, validate_whatsapp=False)
-
-    assert [line.key for line in lines] == ["run_fee", "companies"]
-    assert total_credits(lines) == 15 + 100
+    assert [line.key for line in lines] == ["contacts", "whatsapp"]
+    assert total_credits(lines) == 3 * 10 + 2 * 5
 
 
-def test_no_companies_is_just_the_run_fee() -> None:
-    lines = cost_lines(companies=0, whatsapp_checks=0, validate_whatsapp=True)
+def test_no_whatsapp_line_when_nothing_came_back_active() -> None:
+    lines = cost_lines(verified_contacts=3, active_whatsapp=0)
 
-    assert [line.key for line in lines] == ["run_fee"]
-    assert total_credits(lines) == 15
+    assert [line.key for line in lines] == ["contacts"]
+    assert total_credits(lines) == 30
+
+
+def test_no_verified_contacts_is_free() -> None:
+    lines = cost_lines(verified_contacts=0, active_whatsapp=0)
+
+    assert lines == []
+    assert total_credits(lines) == 0
 
 
 # --- The quote ---------------------------------------------------------------
@@ -203,14 +229,16 @@ async def test_quote_uses_defaults_for_a_new_account(
     assert body["based_on_history"] is False
     assert body["runs_sampled"] == 0
     assert body["estimated_companies"] == DEFAULT_COMPANIES_PER_KEYWORD
-    assert body["total"] == 15 + DEFAULT_COMPANIES_PER_KEYWORD * 25
+    expected_contacts = round(
+        DEFAULT_COMPANIES_PER_KEYWORD * DEFAULT_CONTACTS_PER_COMPANY
+    )
+    assert body["total"] == expected_contacts * 10
     assert body["balance"] == 0
     assert body["affordable"] is False
     assert body["shortfall"] == body["total"]
     # The rates ride along so the UI never hardcodes a price.
-    assert body["run_fee_credits"] == 15
-    assert body["company_credits"] == 25
-    assert body["whatsapp_credits"] == 8
+    assert body["contact_credits"] == 10
+    assert body["whatsapp_credits"] == 5
 
 
 async def test_quote_adds_whatsapp_when_requested(
@@ -225,12 +253,8 @@ async def test_quote_adds_whatsapp_when_requested(
         with_checks["estimated_companies"] * DEFAULT_CONTACTS_PER_COMPANY
     )
     assert with_checks["estimated_whatsapp_checks"] == expected_checks
-    assert with_checks["total"] == without["total"] + expected_checks * 8
-    assert [line["key"] for line in with_checks["lines"]] == [
-        "run_fee",
-        "companies",
-        "whatsapp",
-    ]
+    assert with_checks["total"] == without["total"] + expected_checks * 5
+    assert [line["key"] for line in with_checks["lines"]] == ["contacts", "whatsapp"]
 
 
 async def test_quote_learns_from_the_accounts_own_runs(
@@ -282,7 +306,10 @@ async def test_a_search_the_balance_cannot_cover_is_refused(
     error = response.json()["error"]
     assert error["code"] == "insufficient_credits"
     assert error["details"]["balance"] == 0
-    assert error["details"]["required"] == 15 + DEFAULT_COMPANIES_PER_KEYWORD * 25
+    expected_contacts = round(
+        DEFAULT_COMPANIES_PER_KEYWORD * DEFAULT_CONTACTS_PER_COMPANY
+    )
+    assert error["details"]["required"] == expected_contacts * 10
     assert error["details"]["shortfall"] == error["details"]["required"]
 
     # Refused means refused: no run row was opened.
@@ -304,7 +331,7 @@ async def test_nothing_is_charged_at_dispatch(
 # --- Settlement --------------------------------------------------------------
 
 
-async def test_a_successful_run_is_charged_from_its_results(
+async def test_a_successful_run_is_charged_for_its_verified_contacts(
     client: AsyncClient, db_session, monkeypatch
 ) -> None:
     headers = await _headers(client, db_session)
@@ -313,7 +340,7 @@ async def test_a_successful_run_is_charged_from_its_results(
 
     await _results(client, run_id, token, companies=_companies(3))
 
-    expected = 15 + 3 * 25
+    expected = 3 * 10
     assert await _balance(client, headers) == PRO_CREDITS - expected
 
     run = await _run(client, headers, run_id)
@@ -322,18 +349,40 @@ async def test_a_successful_run_is_charged_from_its_results(
     assert run["whatsapp_checks"] == 0
     assert run["credits_charged_at"] is not None
 
-    # One ledger entry per line, so the wallet history explains the charge.
     lines = await _usage_lines(client, headers)
-    assert [line["amount"] for line in lines] == [-15, -75]
-    assert "run fee" in lines[0]["description"]
-    assert "3 companies" in lines[1]["description"]
+    assert [line["amount"] for line in lines] == [-30]
+    assert "3 verified emails" in lines[0]["description"]
     assert all(line["reference_id"] == run_id for line in lines)
 
 
-async def test_whatsapp_checks_are_charged_whatever_their_result(
+async def test_a_company_with_no_verified_contact_is_free(
     client: AsyncClient, db_session, monkeypatch
 ) -> None:
-    """Active and Not Active both cost 8; null means no check was made."""
+    """Finding a company shell costs nothing on its own."""
+    headers = await _headers(client, db_session)
+    await _fund(client, headers, "pro_yearly")
+    run_id, token = await _start(client, headers, monkeypatch)
+
+    companies = [
+        {"company_name": "No Contact Co", "website": "no-contact.example.com"},
+        {
+            "company_name": "Unverified Co",
+            "website": "unverified.example.com",
+            "decision_makers": [_contact(0, valid_email=False)],
+        },
+    ]
+    await _results(client, run_id, token, companies=companies)
+
+    assert await _balance(client, headers) == PRO_CREDITS
+    run = await _run(client, headers, run_id)
+    assert run["credits_charged"] == 0
+    assert await _usage_lines(client, headers) == []
+
+
+async def test_only_active_whatsapp_is_billed(
+    client: AsyncClient, db_session, monkeypatch
+) -> None:
+    """Not Active and null both cost nothing extra; only Active does."""
     headers = await _headers(client, db_session)
     await _fund(client, headers, "pro_yearly")
     run_id, token = await _start(client, headers, monkeypatch, validate_whatsapp=True)
@@ -341,23 +390,24 @@ async def test_whatsapp_checks_are_charged_whatever_their_result(
     companies = _companies(2, statuses=["Active", "Not Active", None, "Active"])
     await _results(client, run_id, token, companies=companies)
 
-    checks = 3  # the null one was never checked
-    expected = 15 + 2 * 25 + checks * 8
+    verified = 4
+    active = 2
+    expected = verified * 10 + active * 5
     assert await _balance(client, headers) == PRO_CREDITS - expected
 
     run = await _run(client, headers, run_id)
-    assert run["whatsapp_checks"] == checks
+    assert run["whatsapp_checks"] == active
     assert run["credits_charged"] == expected
 
     lines = await _usage_lines(client, headers)
-    assert [line["amount"] for line in lines] == [-15, -50, -24]
-    assert "3 WhatsApp checks" in lines[2]["description"]
+    assert [line["amount"] for line in lines] == [-40, -10]
+    assert "2 active WhatsApps" in lines[1]["description"]
 
 
-async def test_whatsapp_statuses_are_free_when_validation_was_off(
+async def test_whatsapp_is_free_when_validation_was_off(
     client: AsyncClient, db_session, monkeypatch
 ) -> None:
-    """The workflow reporting a status is not the same as the user asking."""
+    """The workflow reporting Active is not the same as the user asking."""
     headers = await _headers(client, db_session)
     await _fund(client, headers, "pro_yearly")
     run_id, token = await _start(client, headers, monkeypatch, validate_whatsapp=False)
@@ -365,13 +415,16 @@ async def test_whatsapp_statuses_are_free_when_validation_was_off(
     companies = _companies(2, statuses=["Active", "Not Active"])
     await _results(client, run_id, token, companies=companies)
 
-    assert await _balance(client, headers) == PRO_CREDITS - (15 + 50)
+    verified = 2
+    assert await _balance(client, headers) == PRO_CREDITS - verified * 10
     run = await _run(client, headers, run_id)
     assert run["whatsapp_checks"] == 0
-    assert [line["amount"] for line in await _usage_lines(client, headers)] == [-15, -50]
+    assert [line["amount"] for line in await _usage_lines(client, headers)] == [
+        -verified * 10
+    ]
 
 
-async def test_the_companies_line_counts_what_was_saved(
+async def test_the_contact_line_counts_what_was_saved(
     client: AsyncClient, db_session, monkeypatch
 ) -> None:
     """Billed on rows saved, so a duplicate in the payload is not paid twice."""
@@ -384,7 +437,7 @@ async def test_the_companies_line_counts_what_was_saved(
     await _results(client, run_id, token, companies=companies)
 
     run = await _run(client, headers, run_id)
-    assert run["credits_charged"] == 15 + run["companies_found"] * 25
+    assert run["credits_charged"] == 3 * 10
     assert run["companies_found"] == 3
 
 
@@ -449,9 +502,9 @@ async def test_a_retried_results_post_is_charged_once(
     for _ in range(3):
         await _results(client, run_id, token, companies=companies)
 
-    expected = 15 + 3 * 25
+    expected = 3 * 10
     assert await _balance(client, headers) == PRO_CREDITS - expected
-    assert len(await _usage_lines(client, headers)) == 2
+    assert len(await _usage_lines(client, headers)) == 1
     assert (await _run(client, headers, run_id))["credits_charged"] == expected
 
 
@@ -461,17 +514,17 @@ async def test_a_retried_results_post_is_charged_once(
 async def test_a_bill_beyond_the_balance_is_charged_as_far_as_it_goes(
     client: AsyncClient, db_session, monkeypatch
 ) -> None:
-    """The estimate passed the gate, but the workflow found far more than
-    expected. Results are kept, the balance stops at zero, and the rest is
-    recorded rather than lost."""
+    """The estimate passed the gate, but the workflow found far more verified
+    contacts than expected. Results are kept, the balance stops at zero, and
+    the rest is recorded rather than lost."""
     headers = await _headers(client, db_session)
-    await _fund(client, headers, "starter_monthly")  # 490: covers the 265 estimate
+    await _fund(client, headers, "starter_monthly")  # 490 credits
     run_id, token = await _start(client, headers, monkeypatch)
 
-    found = 30  # 15 + 750 = 765, well over 490
+    found = 60  # 60 x 10 = 600, well over 490
     await _results(client, run_id, token, companies=_companies(found))
 
-    bill = 15 + found * 25
+    bill = found * 10
     assert await _balance(client, headers) == 0
 
     run = await _run(client, headers, run_id)
@@ -479,11 +532,9 @@ async def test_a_bill_beyond_the_balance_is_charged_as_far_as_it_goes(
     assert run["credits_charged"] == STARTER_CREDITS
     assert run["credits_shortfall"] == bill - STARTER_CREDITS
 
-    # The ledger shows the run fee in full and the companies line as partial.
     lines = await _usage_lines(client, headers)
-    assert lines[0]["amount"] == -15
-    assert lines[1]["amount"] == -(STARTER_CREDITS - 15)
-    assert "partial" in lines[1]["description"]
+    assert lines[0]["amount"] == -STARTER_CREDITS
+    assert "partial" in lines[0]["description"]
 
 
 async def test_a_shortfall_raises_a_notification(
@@ -492,7 +543,7 @@ async def test_a_shortfall_raises_a_notification(
     headers = await _headers(client, db_session)
     await _fund(client, headers, "starter_monthly")
     run_id, token = await _start(client, headers, monkeypatch)
-    await _results(client, run_id, token, companies=_companies(30))
+    await _results(client, run_id, token, companies=_companies(60))
 
     response = await client.get(f"{PREFIX}/notifications", headers=headers)
     titles = [n["title"] for n in response.json()["items"]]
@@ -517,7 +568,7 @@ async def test_a_shortfall_notification_ignores_the_credits_preference(
     assert muted.status_code == 200
 
     run_id, token = await _start(client, headers, monkeypatch)
-    await _results(client, run_id, token, companies=_companies(30))
+    await _results(client, run_id, token, companies=_companies(60))
 
     titles = await _notification_titles(client, headers)
     assert any("could not be charged" in title for title in titles)
@@ -549,7 +600,7 @@ async def test_settlement_is_stored_on_the_run(
 
     run = await _db_run(db_session, run_id)
 
-    assert run.credits_charged == 15 + 50 + 16
+    assert run.credits_charged == 2 * 10 + 1 * 5
     assert run.credits_shortfall == 0
-    assert run.whatsapp_checks == 2
+    assert run.whatsapp_checks == 1
     assert run.credits_charged_at is not None
