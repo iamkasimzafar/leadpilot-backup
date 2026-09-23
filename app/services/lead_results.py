@@ -126,6 +126,12 @@ class LeadResultsService(BaseService):
         for incoming in payload.companies:
             company, is_new = await self._upsert_company(run, incoming)
 
+            # Record the run that found it, alongside Company.run_id. The
+            # column is a single pointer this very upsert may have just moved
+            # off an older run; the link table is what keeps that run's
+            # results intact.
+            await self.companies.link_to_run(run.id, company.id)
+
             if is_new:
                 saved += 1
             else:

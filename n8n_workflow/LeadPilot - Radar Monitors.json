@@ -24,13 +24,13 @@
     {
       "parameters": {
         "method": "GET",
-        "url": "={{ $env.LEADPILOT_API_URL }}/api/v1/lead-radar/monitors/due",
+        "url": "http://43.157.81.74:8000/api/v1/lead-radar/monitors/due",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "X-LeadPilot-Token",
-              "value": "={{ $env.LEADPILOT_N8N_SECRET }}"
+              "value": "JX9C4q7ITD-5uo9WLypjKxJgn7fKDsMKlOPwpGgPhug"
             }
           ]
         },
@@ -84,7 +84,7 @@
           "parameters": [
             {
               "name": "X-API-KEY",
-              "value": "={{ $env.SERPER_API_KEY }}"
+              "value": "016b60e2451da747315ef3516797a5c7f6b40b51"
             },
             {
               "name": "Content-Type",
@@ -94,7 +94,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{\nJSON.stringify((() => {\n  const m = $('Loop Monitors').item.json;\n\n  // Company-type OR-group, same idea as the manual search. A monitor has no\n  // company_type of its own, so the plain term is used.\n  const q = m.search_term;\n\n  return {\n    q,\n    gl: m.country || undefined,\n    num: Math.min(m.limit_per_run || 50, 100),\n    // The whole point of the monitor: start where the last run stopped.\n    page: m.serper_page || 1\n  };\n})())\n}}",
+        "jsonBody": "={{\nJSON.stringify((() => {\n  const m = $('Loop Monitors').item.json;\n\n  // `num` must match the page width the backend assumed when it turned\n  // serper_offset into serper_page, or the two drift and the monitor\n  // re-reads ground it has already covered. The backend caps limit_per_run\n  // at 100, which is also Serper's own maximum.\n  const num = Math.min(m.limit_per_run || 50, 100);\n\n  const body = {\n    q: m.search_term,\n    num,\n    // The whole point of the monitor: start where the last run stopped.\n    // Page 1 is offset 0, page 2 is the next `num` results, and so on.\n    page: m.serper_page || 1\n  };\n\n  // Serper reads an empty `gl` as a country filter, not as \"worldwide\", so\n  // the key is left out entirely rather than sent blank.\n  if (m.country) body.gl = m.country;\n\n  return body;\n})())\n}}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -122,7 +122,8 @@
         4032
       ],
       "id": "bb27b68f-5f54-4e2a-9c86-19919885ffdf",
-      "name": "Backlisting"
+      "name": "Backlisting",
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -691,7 +692,8 @@
         3888
       ],
       "id": "b6c81c78-2798-4a54-8507-29720ba81e90",
-      "name": "Group Leads & Apply Abandon Rule"
+      "name": "Group Leads & Apply Abandon Rule",
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -708,7 +710,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"monitor_id\": \"{{ $('Loop Monitors').item.json.monitor_id }}\",\n  \"status\": \"completed\",\n  \"companies\": {{ JSON.stringify($input.all().map(i => i.json)) }}\n}",
+        "jsonBody": "={{\nJSON.stringify((() => {\n  const companies = $input.all()\n    .map(i => i.json)\n    .filter(c => c && !c.error && c.company_name);\n\n  return {\n    monitor_id: $('Loop Monitors').item.json.monitor_id,\n    run_id: $('Loop Monitors').item.json.run_id,\n    status: 'completed',\n    companies\n  };\n})())\n}}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -723,6 +725,8 @@
       "retryOnFail": true,
       "maxTries": 4,
       "waitBetweenTries": 5000,
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput",
       "notes": "The backend dedupes these contacts against everything the user already has and bills only what is new."
     },
     {
@@ -736,7 +740,8 @@
         4000
       ],
       "id": "483ad3ae-6e5d-4a93-aa6e-bed4908b8c21",
-      "name": "Filter the companies"
+      "name": "Filter the companies",
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -749,7 +754,8 @@
         4016
       ],
       "id": "254fe169-3125-4999-babe-0bb7ccd26555",
-      "name": "Filter & Limit Prospects"
+      "name": "Filter & Limit Prospects",
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -810,7 +816,8 @@
       ],
       "id": "7335f838-db47-42d6-8539-6d1acbd6c3ab",
       "name": "Guard: AI Qualified",
-      "executeOnce": false
+      "executeOnce": false,
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -838,7 +845,8 @@
         3888
       ],
       "id": "d70fae1b-a4b6-42a8-a703-0270255e7bc6",
-      "name": "Guard: Valid Emails"
+      "name": "Guard: Valid Emails",
+      "onError": "continueRegularOutput"
     }
   ],
   "pinData": {},
@@ -1280,8 +1288,7 @@
     "timeSavedMode": "fixed",
     "saveExecutionProgress": true,
     "callerPolicy": "workflowsFromSameOwner",
-    "availableInMCP": false,
-    "errorWorkflow": "8jaVvfzmebEYKd5I"
+    "availableInMCP": false
   },
   "meta": {
     "templateCredsSetupCompleted": true,

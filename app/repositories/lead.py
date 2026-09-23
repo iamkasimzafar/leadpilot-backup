@@ -5,7 +5,7 @@ from datetime import datetime
 from sqlalchemy import Select, func, or_, select
 from sqlalchemy.sql.elements import ColumnElement
 
-from app.models.lead import Company, DecisionMaker, LeadStatus
+from app.models.lead import Company, CompanySearchRun, DecisionMaker, LeadStatus
 from app.repositories.base import BaseRepository
 from app.schemas.lead import WHATSAPP_ACTIVE
 
@@ -224,17 +224,47 @@ class CompanyRepository(BaseRepository[Company]):
         return list(result.scalars().all())
 
     async def list_for_run(self, run_id: str) -> list[Company]:
+        """Every company this run found, including ones a later run re-found.
+
+        Read through company_search_run rather than Company.run_id: that column
+        is a single pointer a later search moves onto itself, which emptied out
+        the results of every older run that had found the same company.
+        """
         stmt = (
             select(Company)
-            .where(Company.run_id == run_id)
+            .join(CompanySearchRun, CompanySearchRun.company_id == Company.id)
+            .where(CompanySearchRun.run_id == run_id)
             .order_by(Company.created_at.asc())
         )
         result = await self.db.execute(stmt)
 
         return list(result.scalars().all())
 
+    async def link_to_run(self, run_id: str, company_id: str) -> None:
+        """Record that this run produced this company.
+
+        Idempotent: a repeat results POST (an n8n retry, or the per-item burst)
+        re-links the same pair, and the unique constraint means the second
+        write is simply skipped rather than duplicating the row.
+        """
+        existing = await self.db.execute(
+            select(CompanySearchRun.id).where(
+                CompanySearchRun.run_id == run_id,
+                CompanySearchRun.company_id == company_id,
+            )
+        )
+        if existing.scalar_one_or_none() is not None:
+            return
+
+        self.db.add(CompanySearchRun(run_id=run_id, company_id=company_id))
+        await self.db.flush()
+
     async def count_for_run(self, run_id: str) -> int:
-        stmt = select(func.count()).select_from(Company).where(Company.run_id == run_id)
+        stmt = (
+            select(func.count())
+            .select_from(CompanySearchRun)
+            .where(CompanySearchRun.run_id == run_id)
+        )
         result = await self.db.execute(stmt)
 
         return result.scalar_one()
@@ -286,8 +316,11 @@ class DecisionMakerRepository(BaseRepository[DecisionMaker]):
         stmt = (
             select(func.count())
             .select_from(DecisionMaker)
-            .join(Company, Company.id == DecisionMaker.company_id)
-            .where(Company.run_id == run_id)
+            .join(
+                CompanySearchRun,
+                CompanySearchRun.company_id == DecisionMaker.company_id,
+            )
+            .where(CompanySearchRun.run_id == run_id)
         )
         result = await self.db.execute(stmt)
 
@@ -303,9 +336,12 @@ class DecisionMakerRepository(BaseRepository[DecisionMaker]):
         stmt = (
             select(func.count())
             .select_from(DecisionMaker)
-            .join(Company, Company.id == DecisionMaker.company_id)
+            .join(
+                CompanySearchRun,
+                CompanySearchRun.company_id == DecisionMaker.company_id,
+            )
             .where(
-                Company.run_id == run_id,
+                CompanySearchRun.run_id == run_id,
                 DecisionMaker.verified_email.is_not(None),
                 func.lower(DecisionMaker.email_status) == _EMAIL_VALID,
             )
@@ -323,9 +359,12 @@ class DecisionMakerRepository(BaseRepository[DecisionMaker]):
         stmt = (
             select(func.count())
             .select_from(DecisionMaker)
-            .join(Company, Company.id == DecisionMaker.company_id)
+            .join(
+                CompanySearchRun,
+                CompanySearchRun.company_id == DecisionMaker.company_id,
+            )
             .where(
-                Company.run_id == run_id,
+                CompanySearchRun.run_id == run_id,
                 DecisionMaker.verified_email.is_not(None),
                 func.lower(DecisionMaker.email_status) == _EMAIL_VALID,
                 DecisionMaker.whatsapp_status == WHATSAPP_ACTIVE,

@@ -526,6 +526,14 @@ class SearchRunRead(BaseSchema):
     stage: str
     companies_found: int
     contacts_found: int
+    # Monitor runs: how the contacts found were split. A monitor keeps
+    # re-finding people the user already has; those are skipped and never
+    # billed, so the run needs to say so rather than looking like it lost
+    # most of what it found. Both 0 on a manual search.
+    contacts_added: int = 0
+    contacts_duplicate: int = 0
+    # The monitor a scheduled run belongs to. Null for a manual search.
+    monitor_id: str | None = None
     error: str | None = None
     # Classified cause when the workflow failed (rate_limited, timeout, ...),
     # so the UI can show advice rather than n8n's raw text. None otherwise.

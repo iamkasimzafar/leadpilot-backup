@@ -5,6 +5,10 @@
 # a rollback is re-running this workflow against an older tag.
 #
 # Nothing deploys unless ruff, mypy and pytest all pass first.
+#
+# This deploys onto a LIVE service, so the deploy step is written to fail
+# safe: it records the image that is currently serving, and if the new one
+# does not come back healthy it puts the old one back before failing the run.
 
 name: Deploy API
 
@@ -72,6 +76,7 @@ jobs:
       packages: write
     outputs:
       tag: ${{ steps.resolve.outputs.tag }}
+      image: ${{ steps.image.outputs.name }}
 
     steps:
       - uses: actions/checkout@v4
@@ -131,73 +136,103 @@ jobs:
       url: ${{ vars.PUBLIC_API_URL }}
 
     steps:
-      - name: Lower-case the image name
-        id: image
-        run: echo "name=${IMAGE_NAME,,}" >> "$GITHUB_OUTPUT"
-
-      # The whole deploy is one SSH session: pull, migrate, restart, verify.
-      # It fails loudly at the first step that does not work.
-      - name: Pull, migrate and restart
+      # One SSH session for the whole deploy: pull, migrate, restart, verify,
+      # and roll back if the verify fails. Splitting verification into its own
+      # step would leave a broken container serving while the workflow moved
+      # on, so it all lives here where the previous image is still in scope.
+      - name: Pull, migrate, restart and verify
         uses: appleboy/ssh-action@v1.2.0
         env:
-          IMAGE: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:${{ needs.build.outputs.tag }}
+          IMAGE: ${{ env.REGISTRY }}/${{ needs.build.outputs.image }}:${{ needs.build.outputs.tag }}
+          API_PORT: ${{ vars.API_PORT || 8000 }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GHCR_TOKEN }}
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
           port: ${{ secrets.SSH_PORT || 22 }}
-          envs: IMAGE
+          envs: IMAGE,API_PORT,REGISTRY_USER,REGISTRY_TOKEN
           script_stop: true
           script: |
             set -euo pipefail
             cd ${{ secrets.DEPLOY_PATH }}
+
+            # This account is not in the docker group, so every docker call
+            # goes through passwordless sudo. `-n` makes a missing NOPASSWD
+            # rule fail loudly instead of hanging on a password prompt with no
+            # TTY to type into.
+            d() { sudo -n docker "$@"; }
+            dc() { sudo -n docker compose --env-file .env.deploy "$@"; }
 
             echo "Deploying $IMAGE"
 
             # The compose file reads the image from this variable, so the same
             # file serves every version and a rollback is one line.
-            grep -q '^LEADPILOT_IMAGE=' .env.deploy 2>/dev/null \
-              && sed -i "s|^LEADPILOT_IMAGE=.*|LEADPILOT_IMAGE=$IMAGE|" .env.deploy \
-              || echo "LEADPILOT_IMAGE=$IMAGE" >> .env.deploy
+            touch .env.deploy
+            PREVIOUS=$(grep -oP '^LEADPILOT_IMAGE=\K.*' .env.deploy || true)
+            echo "Currently serving: ${PREVIOUS:-<none>}"
 
-            echo "${{ secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}" \
-              | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            if grep -q '^LEADPILOT_IMAGE=' .env.deploy; then
+              sed -i "s|^LEADPILOT_IMAGE=.*|LEADPILOT_IMAGE=$IMAGE|" .env.deploy
+            else
+              echo "LEADPILOT_IMAGE=$IMAGE" >> .env.deploy
+            fi
 
-            docker compose --env-file .env.deploy pull api
+            # GITHUB_TOKEN dies with the workflow run, so it cannot be used to
+            # pull from the server. A PAT with read:packages is required, and
+            # a private package with no token fails here rather than in a
+            # confusing way later.
+            if [ -n "${REGISTRY_TOKEN:-}" ]; then
+              echo "$REGISTRY_TOKEN" | d login ghcr.io -u "$REGISTRY_USER" --password-stdin
+            else
+              echo "No GHCR_TOKEN set; assuming the package is public." >&2
+            fi
+
+            dc pull api
 
             # Migrations run BEFORE the new container serves traffic: the app
             # does not migrate on startup, so a schema change would otherwise
-            # meet code expecting it.
-            docker compose --env-file .env.deploy run --rm api alembic upgrade head
+            # meet code expecting it. `run --rm` uses the new image, so this is
+            # the new code's migration against the live database.
+            dc run --rm api alembic upgrade head
 
-            docker compose --env-file .env.deploy up -d --no-deps api
-
-            # Old images accumulate fast; keep the disk from filling.
-            docker image prune -f --filter "until=168h"
-
-      - name: Verify it came back up
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_KEY }}
-          port: ${{ secrets.SSH_PORT || 22 }}
-          script_stop: true
-          script: |
-            set -euo pipefail
+            dc up -d --no-deps api
 
             # Readiness, not liveness: it proves the container can reach MySQL,
             # which is the failure this deploy is most likely to cause.
+            healthy=0
             for attempt in $(seq 1 15); do
-              if curl -fsS http://127.0.0.1:${{ vars.API_PORT || 8000 }}/api/v1/health/ready; then
+              if curl -fsS --max-time 5 "http://127.0.0.1:${API_PORT}/api/v1/health/ready"; then
                 echo ""
                 echo "Healthy after ${attempt} attempt(s)."
-                exit 0
+                healthy=1
+                break
               fi
               sleep 4
             done
 
-            echo "API did not become ready. Recent logs:"
-            cd ${{ secrets.DEPLOY_PATH }}
-            docker compose --env-file .env.deploy logs --tail 60 api
-            exit 1
+            if [ "$healthy" -ne 1 ]; then
+              echo "::error::New image failed its readiness check."
+              dc logs --tail 80 api || true
+
+              if [ -n "$PREVIOUS" ]; then
+                echo "Rolling back to $PREVIOUS"
+                sed -i "s|^LEADPILOT_IMAGE=.*|LEADPILOT_IMAGE=$PREVIOUS|" .env.deploy
+                dc up -d --no-deps api
+                # The database is NOT rolled back. Migrations here are
+                # additive, so the previous image tolerates the new schema;
+                # a destructive migration would need a manual restore from
+                # /root/leadpilot-backups.
+                echo "::warning::Rolled back to the previous image. The schema was left migrated."
+              else
+                echo "::error::No previous image recorded; cannot roll back automatically."
+              fi
+
+              exit 1
+            fi
+
+            # Old images accumulate fast; keep the disk from filling. Runs
+            # only on success, so a failed deploy leaves the rollback target
+            # in place.
+            d image prune -f --filter "until=168h"

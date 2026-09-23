@@ -163,3 +163,51 @@ class DecisionMaker(Base):
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<DecisionMaker {self.full_name}>"
+
+
+class CompanySearchRun(Base):
+    """Which runs found which company: the history `Company.run_id` cannot keep.
+
+    A company the user already holds is reused rather than duplicated when a
+    later search finds it again (see CompanyRepository.find_existing), and that
+    reuse moves `Company.run_id` to the newer run. One pointer cannot record
+    two runs, so the older search's results silently emptied out even though
+    its own `companies_found` total still said otherwise.
+
+    This table records the link instead of overwriting it: one row per
+    (run, company), written every time a run produces that company. Opening an
+    old search then lists exactly what it found, whoever found it since.
+    """
+
+    __tablename__ = "company_search_run"
+
+    __table_args__ = (
+        # One link per pair: a run that re-posts its results (an n8n retry, or
+        # the per-item burst) must not add a second row for the same company.
+        UniqueConstraint("run_id", "company_id", name="uq_company_search_run"),
+        Index("ix_company_search_run_company_id", "company_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid_str)
+
+    run_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("lead_search_run.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    company_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("company.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_utcnow,
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"<CompanySearchRun run={self.run_id} company={self.company_id}>"

@@ -93,6 +93,11 @@ class SearchType(StrEnum):
     # domain search through verification -- is the same Snov.io chain a b2b
     # search uses, and it is billed exactly like one.
     HS_CODE = "hs_code"
+    # A Radar Monitor's scheduled run. The same Serper -> DeepSeek -> Snov.io
+    # chain a b2b search uses, started by n8n's own cron rather than by the
+    # user. Recorded as a run so a monitor's work shows up in Your Searches
+    # beside the searches the user started by hand.
+    MONITOR = "monitor"
 
 
 # Display order for the progress tracker. `queued` is implicit (the run starts
@@ -285,6 +290,22 @@ class LeadSearchRun(Base, TimestampMixin):
     # Running totals reported by the workflow, for the summary line.
     companies_found: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     contacts_found: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # Monitor runs only: how the contacts the workflow returned were split.
+    #
+    # A monitor re-runs the same search for weeks and will keep re-finding
+    # people the user already has. Those are discarded and never billed, so
+    # without recording them the run reads as "found 8, saved 1" with no
+    # explanation. `contacts_added` is what was genuinely new;
+    # `contacts_duplicate` is what was skipped as already-owned.
+    contacts_added: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    contacts_duplicate: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # The monitor this run belongs to, for monitor runs. Null for every search
+    # the user started by hand.
+    monitor_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("radar_monitors.id", ondelete="SET NULL"), nullable=True
+    )
 
     # Set when the workflow reports a failure, or the run is abandoned.
     error: Mapped[str | None] = mapped_column(String(500), nullable=True)

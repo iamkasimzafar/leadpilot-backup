@@ -249,6 +249,54 @@ async def test_reposting_the_same_results_does_not_duplicate(
     assert len(companies[0]["decision_makers"]) == 2
 
 
+async def test_an_earlier_run_keeps_its_results_when_a_later_one_refinds_them(
+    client: AsyncClient, db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A company found twice belongs to both runs, not only the newer one.
+
+    The user's company rows are deduplicated per (user, website), so a second
+    search for the same thing reuses the row the first one created. That reuse
+    moves company.run_id onto the newer run, which used to empty the older
+    search's results even though its own companies_found still said otherwise.
+    """
+    captured = _mock_n8n(monkeypatch)
+    tokens = await signed_in_tokens(client, db_session)
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+    await _fund(client, headers)
+
+    async def start(keyword: str) -> tuple[str, str]:
+        response = await client.post(
+            SEARCH,
+            json={"original_keyword": keyword, "expanded_keywords": []},
+            headers=headers,
+        )
+        assert response.status_code == 200
+
+        return response.json()["run_id"], captured["progress_token"]
+
+    first_run, first_token = await start("LED screen")
+    await _post_results(client, first_run, first_token, companies=[SAMPLE_COMPANY])
+
+    # A second search, by the same user, that finds the same company again.
+    second_run, second_token = await start("LED display")
+    await _post_results(client, second_run, second_token, companies=[SAMPLE_COMPANY])
+
+    # Both runs list it: the newer one because it just found it, the older one
+    # because it found it first and that is what the run is a record of.
+    for run_id in (first_run, second_run):
+        listed = await client.get(
+            f"{PREFIX}/lead-radar/runs/{run_id}/results", headers=headers
+        )
+        assert listed.status_code == 200
+        companies = listed.json()
+        assert len(companies) == 1, f"run {run_id} lost its results"
+        assert companies[0]["company_name"] == SAMPLE_COMPANY["company_name"]
+
+    # And the older run's own totals still match what it lists.
+    run = await client.get(f"{PREFIX}/lead-radar/runs/{first_run}", headers=headers)
+    assert run.json()["companies_found"] == 1
+
+
 # --- Tolerating the workflow's real-world output ------------------------------
 
 

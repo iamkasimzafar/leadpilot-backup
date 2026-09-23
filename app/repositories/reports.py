@@ -20,7 +20,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.billing import CreditTransaction
-from app.models.lead import Company, DecisionMaker
+from app.models.lead import Company, CompanySearchRun, DecisionMaker
 from app.models.lead_search import LeadSearchRun, RunStatus
 
 
@@ -212,16 +212,23 @@ class ReportsRepository:
         rows, so a keyword searched twice for nothing does not outrank one that
         searched once and found thirty.
         """
+        # Joined through company_search_run, not Company.run_id: that column
+        # only ever points at the run that touched the company LAST, so a
+        # keyword's companies would otherwise be credited to whichever later
+        # search happened to re-find them.
         stmt = (
-            select(LeadSearchRun.original_keyword, func.count(Company.id))
-            .join(Company, Company.run_id == LeadSearchRun.id)
+            select(
+                LeadSearchRun.original_keyword,
+                func.count(CompanySearchRun.company_id),
+            )
+            .join(CompanySearchRun, CompanySearchRun.run_id == LeadSearchRun.id)
             .where(
                 LeadSearchRun.user_id == user_id,
                 LeadSearchRun.created_at >= start,
                 LeadSearchRun.created_at < end,
             )
             .group_by(LeadSearchRun.original_keyword)
-            .order_by(func.count(Company.id).desc())
+            .order_by(func.count(CompanySearchRun.company_id).desc())
             .limit(limit)
         )
         result = await self.db.execute(stmt)

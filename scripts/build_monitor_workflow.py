@@ -26,12 +26,48 @@ Usage:  python scripts/build_monitor_workflow.py
 """
 
 import json
+import os
 import pathlib
 import re
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "n8n_workflow" / "LeadPilot.json"
 TARGET = ROOT / "n8n_workflow" / "LeadPilot - Radar Monitors.json"
+
+# Where the workflow calls the backend, and the secret it presents.
+#
+# Inlined rather than read from `$env`, because n8n denies expression access
+# to environment variables by default (N8N_BLOCK_ENV_ACCESS_IN_NODE) and this
+# instance runs as a hand-started container, so adding vars would mean
+# recreating it. Every existing LeadPilot workflow inlines its keys the same
+# way; this stays consistent with them.
+#
+# Overridable so a different host or secret can be generated without editing
+# the script:  API_URL=https://... python scripts/build_monitor_workflow.py
+API_URL = os.environ.get("LEADPILOT_API_URL", "http://43.157.81.74:8000")
+WORKFLOW_SECRET = os.environ.get("LEADPILOT_N8N_SECRET", "")
+
+# Reused from the manual-search workflow so both call Serper on one account.
+SERPER_API_KEY = os.environ.get("SERPER_API_KEY", "")
+
+
+def _serper_key_from_source(source: dict) -> str:
+    """The Serper key the manual-search workflow already uses.
+
+    Read from that workflow rather than duplicated here, so rotating the key
+    in one place and regenerating keeps the two in step.
+    """
+    for node in source["nodes"]:
+        if node["name"] != "serper":
+            continue
+
+        params = node.get("parameters", {})
+        headers = params.get("headerParameters", {}).get("parameters", [])
+        for header in headers:
+            if header.get("name", "").lower() == "x-api-key":
+                return str(header.get("value", ""))
+
+    return ""
 
 # Nodes that only exist to drive the live progress tracker. A monitor runs
 # unattended, so there is nothing to report to.
@@ -46,6 +82,28 @@ PROGRESS_NODES = {
 
 # The head we replace.
 HEAD_NODES = {"Webhook", "Split Out"}
+
+# Nodes that throw when a stage yields nothing.
+#
+# In the manual search that is right: a user is watching, and an empty result
+# should surface as an error they can read. For a monitor it is wrong twice
+# over. "No new companies past page 3" is the ordinary outcome of a monitor
+# that has been running a while, not a fault. And an uncaught throw aborts the
+# whole execution, so with several monitors in the batch the first barren one
+# would strand every monitor queued behind it -- none of them dispatched, none
+# of their offsets advanced, and the failure attributed to no monitor at all.
+#
+# `continueRegularOutput` lets the empty result flow on instead. The run ends
+# at Post Monitor Results with an empty company list, which the backend treats
+# as a completed run worth zero leads.
+EMPTY_RESULT_NODES = {
+    "Backlisting",
+    "Guard: AI Qualified",
+    "Filter the companies",
+    "Filter & Limit Prospects",
+    "Guard: Valid Emails",
+    "Group Leads & Apply Abandon Rule",
+}
 
 
 def _monitor_ref(expr: str) -> str:
@@ -133,16 +191,18 @@ def build() -> dict:
         {
             "parameters": {
                 "method": "GET",
-                "url": "={{ $env.LEADPILOT_API_URL }}/api/v1/lead-radar/monitors/due",
+                "url": f"{API_URL.rstrip('/')}/api/v1/lead-radar/monitors/due",
                 "sendHeaders": True,
                 "headerParameters": {
                     "parameters": [
                         {
                             "name": "X-LeadPilot-Token",
-                            "value": "={{ $env.LEADPILOT_N8N_SECRET }}",
+                            "value": WORKFLOW_SECRET,
                         }
                     ]
                 },
+                # A monitor that is not due is not an error: the endpoint
+                # returns an empty list, and the run should end quietly.
                 "options": {},
             },
             "id": "monitor-fetch-due",
@@ -187,8 +247,14 @@ def build() -> dict:
         clone = dict(node)
         clone["parameters"] = _rewrite(node.get("parameters", {}))
 
+        if clone["name"] in EMPTY_RESULT_NODES:
+            # An empty stage is a normal quiet day for a monitor, not a fault.
+            clone["onError"] = "continueRegularOutput"
+
         if clone["name"] == "serper":
-            clone["parameters"] = _serper_params()
+            clone["parameters"] = _serper_params(
+                SERPER_API_KEY or _serper_key_from_source(source)
+            )
             clone["notes"] = (
                 "`page` comes from the monitor's stored serper_offset. Without "
                 "it every run re-reads the same top results and finds nothing "
@@ -198,6 +264,21 @@ def build() -> dict:
         if clone["name"] == "Send Results to Backend":
             clone["parameters"] = _results_params()
             clone["name"] = "Post Monitor Results"
+
+            # One POST carrying every company, not one per item.
+            clone["executeOnce"] = True
+
+            # The loop only advances when this node emits something. Without
+            # this, a monitor that found nothing would post nothing, produce
+            # no output item, and leave the batch stalled -- every monitor
+            # behind it silently skipped for the night.
+            clone["alwaysOutputData"] = True
+
+            # A monitor whose backend POST fails must not take the rest of the
+            # batch down with it. The loop continues; the backend simply never
+            # hears about this one, and its offset stays where it was.
+            clone["onError"] = "continueRegularOutput"
+
             clone["notes"] = (
                 "The backend dedupes these contacts against everything the "
                 "user already has and bills only what is new."
@@ -247,35 +328,52 @@ def build() -> dict:
         "main": [[{"node": "Loop Monitors", "type": "main", "index": 0}]]
     }
 
+    settings = dict(source.get("settings", {}))
+
+    # The inherited error workflow reports to /lead-radar/error, which
+    # attributes a failure to a lead_search_run. A monitor has no run, so
+    # every monitor failure would be blamed on whichever manual search
+    # happened to be in flight. Dropped until there is a monitor-aware
+    # handler; failures are visible in n8n's own execution list meanwhile.
+    settings.pop("errorWorkflow", None)
+
     return {
         "name": "LeadPilot - Radar Monitors",
         "nodes": nodes,
         "pinData": {},
         "connections": connections,
         "active": False,
-        "settings": source.get("settings", {}),
+        "settings": settings,
         "meta": source.get("meta", {}),
         "tags": [],
     }
 
 
-def _serper_params() -> dict:
+def _serper_params(serper_key: str) -> dict:
     """Serper, asking for the monitor's page rather than always the first."""
     js = """={{
 JSON.stringify((() => {
   const m = $('Loop Monitors').item.json;
 
-  // Company-type OR-group, same idea as the manual search. A monitor has no
-  // company_type of its own, so the plain term is used.
-  const q = m.search_term;
+  // `num` must match the page width the backend assumed when it turned
+  // serper_offset into serper_page, or the two drift and the monitor
+  // re-reads ground it has already covered. The backend caps limit_per_run
+  // at 100, which is also Serper's own maximum.
+  const num = Math.min(m.limit_per_run || 50, 100);
 
-  return {
-    q,
-    gl: m.country || undefined,
-    num: Math.min(m.limit_per_run || 50, 100),
+  const body = {
+    q: m.search_term,
+    num,
     // The whole point of the monitor: start where the last run stopped.
+    // Page 1 is offset 0, page 2 is the next `num` results, and so on.
     page: m.serper_page || 1
   };
+
+  // Serper reads an empty `gl` as a country filter, not as "worldwide", so
+  // the key is left out entirely rather than sent blank.
+  if (m.country) body.gl = m.country;
+
+  return body;
 })())
 }}"""
 
@@ -285,7 +383,7 @@ JSON.stringify((() => {
         "sendHeaders": True,
         "headerParameters": {
             "parameters": [
-                {"name": "X-API-KEY", "value": "={{ $env.SERPER_API_KEY }}"},
+                {"name": "X-API-KEY", "value": serper_key},
                 {"name": "Content-Type", "value": "application/json"},
             ]
         },
@@ -298,11 +396,24 @@ JSON.stringify((() => {
 
 def _results_params() -> dict:
     """Post the run's companies back against the monitor's own token."""
-    body = """={
-  "monitor_id": "{{ $('Loop Monitors').item.json.monitor_id }}",
-  "status": "completed",
-  "companies": {{ JSON.stringify($input.all().map(i => i.json)) }}
-}"""
+    # Items that reached here after an upstream node was told to continue on
+    # error carry an `error` key instead of a company. They are stripped out,
+    # so a quiet run posts an empty list rather than a malformed company the
+    # backend's CompanyIn would reject.
+    body = """={{
+JSON.stringify((() => {
+  const companies = $input.all()
+    .map(i => i.json)
+    .filter(c => c && !c.error && c.company_name);
+
+  return {
+    monitor_id: $('Loop Monitors').item.json.monitor_id,
+    run_id: $('Loop Monitors').item.json.run_id,
+    status: 'completed',
+    companies
+  };
+})())
+}}"""
 
     return {
         "method": "POST",
@@ -329,3 +440,12 @@ if __name__ == "__main__":
         json.dumps(workflow, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     print(f"wrote {TARGET.relative_to(ROOT)} ({len(workflow['nodes'])} nodes)")
+    print(f"  backend: {API_URL}")
+
+    if not WORKFLOW_SECRET:
+        print(
+            "\n  WARNING: no LEADPILOT_N8N_SECRET baked in. /monitors/due refuses\n"
+            "  every request without it, so the workflow will 401. Regenerate with:\n"
+            "    LEADPILOT_N8N_SECRET=<secret> python scripts/build_monitor_workflow.py\n"
+            "  and set the same value as N8N_WEBHOOK_SECRET in the backend .env."
+        )

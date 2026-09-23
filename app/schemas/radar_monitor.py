@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.common import BaseSchema
 from app.schemas.lead import CompanyIn
@@ -123,13 +123,38 @@ class MonitorCreateRequest(BaseModel):
 
 
 class MonitorUpdateRequest(BaseModel):
-    """Every field optional: the UI sends only what changed."""
+    """Every field optional: the UI sends only what changed.
+
+    Changing what the monitor searches is allowed. It resets `serper_offset`
+    (see RadarMonitorService.update), because the offset counts pages through
+    one particular query -- carried over, it would start the new search on
+    page 3 and silently skip its first results.
+    """
 
     name: str | None = Field(default=None, min_length=1, max_length=MAX_NAME_LENGTH)
+
+    search_type: MonitorSearchTypeLiteral | None = None
+    search_value: str | None = Field(
+        default=None, min_length=1, max_length=MAX_SEARCH_VALUE_LENGTH
+    )
+    search_label: str | None = Field(default=None, max_length=MAX_SEARCH_VALUE_LENGTH)
+
     filters: MonitorFilters | None = None
     frequency: MonitorFrequencyLiteral | None = None
     limit_per_run: int | None = None
     status: MonitorStatusLiteral | None = None
+
+    @field_validator("name", "search_value")
+    @classmethod
+    def _strip(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("Must not be blank.")
+
+        return cleaned
 
     @field_validator("limit_per_run")
     @classmethod
@@ -139,6 +164,23 @@ class MonitorUpdateRequest(BaseModel):
             raise ValueError(f"Limit must be one of: {allowed}.")
 
         return value
+
+    @model_validator(mode="after")
+    def _hs_code_shape(self) -> "MonitorUpdateRequest":
+        """An HS-code monitor stores the confirmed 6-digit heading.
+
+        Checked here rather than per-field because the type and the value
+        arrive together, and either one alone cannot tell whether the pair is
+        valid.
+        """
+        if (
+            self.search_type == "hs_code"
+            and self.search_value is not None
+            and not HS_CODE_RE.match(self.search_value)
+        ):
+            raise ValueError("HS code must be 6 digits.")
+
+        return self
 
 
 class MonitorOut(BaseSchema):
@@ -182,12 +224,22 @@ class DueMonitor(BaseModel):
     """
 
     monitor_id: str
+
+    # The run opened for this dispatch. The workflow quotes it back so the
+    # results land on the right row in Your Searches.
+    run_id: str
+
     user_id: str
     search_type: str
 
     # What the pipeline actually searches: the keyword text, or the product
     # wording behind the HS code.
     search_term: str
+
+    # The same value under the name the shared pipeline nodes already read
+    # (Backlisting tags each result with it; DeepSeek's prompt quotes it).
+    # Keeping their field name means those nodes run unmodified.
+    original_keyword: str
 
     # The confirmed HS code, for labelling. None for keyword monitors.
     hs_code: str | None
@@ -213,7 +265,10 @@ class DueMonitor(BaseModel):
     # runs already returned.
     serper_offset: int
 
-    # Serper pages are 10 results; the workflow can use either form.
+    # The `page` to send Serper, given the workflow asks for `limit_per_run`
+    # results per page (`num`). Serper pages are `num` wide, so page 2 with
+    # num=50 is results 51-100. Computed here so the offset arithmetic lives
+    # in one place.
     serper_page: int
 
     results_url: str
@@ -229,6 +284,12 @@ class MonitorResultsRequest(BaseModel):
     """What the monitor workflow posts back when a run finishes."""
 
     monitor_id: str
+
+    # The run this dispatch opened. Optional: the backend falls back to the
+    # monitor's own open run, so a workflow that drops it still closes the
+    # right row.
+    run_id: str | None = None
+
     status: Literal["completed", "failed"] = "completed"
 
     # Same company shape the manual search returns, so the ingest reuses it.
