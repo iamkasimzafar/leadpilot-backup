@@ -107,6 +107,16 @@ class Settings(BaseSettings):
     # How many listings the local workflow asks the API for, per query. The
     # API bills per result, so this caps what one search can cost upstream.
     LOCAL_SEARCH_RESULT_LIMIT: int = 60
+    # Lookalike Companies workflow: one file, two Webhook nodes (step 1
+    # discovery, step 2 find-contacts-for-selected), so two distinct URLs.
+    # Empty disables that step only -- discovery can be down while a contacts
+    # run already in flight still finishes, and vice versa.
+    N8N_LOOKALIKE_DISCOVERY_WEBHOOK_URL: str = ""
+    N8N_LOOKALIKE_CONTACTS_WEBHOOK_URL: str = ""
+    # HS Code search (Advanced Filters): a confirmed 6-digit HS code drives a
+    # Google dork via Serper instead of a keyword search, then the same
+    # Snov.io contact-finding chain a b2b search uses. Empty disables it only.
+    N8N_HS_CODE_WEBHOOK_URL: str = ""
     # Optional shared secret, sent as a header when set. Configure the matching
     # header auth on the n8n Webhook node so the endpoint is not wide open.
     N8N_WEBHOOK_SECRET: str = ""

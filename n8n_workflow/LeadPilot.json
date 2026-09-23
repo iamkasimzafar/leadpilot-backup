@@ -10,10 +10,10 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.1,
       "position": [
-        2464,
-        2416
+        6512,
+        4016
       ],
-      "id": "c71a9ecb-1856-4937-9b1c-7cbf7b6d6113",
+      "id": "36eedb84-c129-491d-ae79-111793823a8d",
       "name": "Webhook",
       "webhookId": "7f163f15-d960-4911-9eef-1959b0d6bf86"
     },
@@ -25,10 +25,10 @@
       "type": "n8n-nodes-base.splitOut",
       "typeVersion": 1,
       "position": [
-        2752,
-        2432
+        6800,
+        4032
       ],
-      "id": "8f9c8881-5a5d-4168-b6ba-dd57056ef8f3",
+      "id": "b0550b4a-7482-4244-957a-429909489c9e",
       "name": "Split Out"
     },
     {
@@ -56,10 +56,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        3104,
-        2432
+        7152,
+        4032
       ],
-      "id": "2a68ba1c-9e2c-4321-b99c-fc4de7f18a24",
+      "id": "e620d7e3-bfe7-44c1-9900-70ac80728cbb",
       "name": "serper",
       "retryOnFail": true,
       "waitBetweenTries": 3000,
@@ -73,10 +73,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        3360,
-        2432
+        7408,
+        4032
       ],
-      "id": "1295c1c9-2f47-4d69-ae4e-3f8f4bc652ec",
+      "id": "bb27b68f-5f54-4e2a-9c86-19919885ffdf",
       "name": "Backlisting"
     },
     {
@@ -88,10 +88,10 @@
       "type": "n8n-nodes-base.removeDuplicates",
       "typeVersion": 2,
       "position": [
-        3552,
-        2432
+        7600,
+        4032
       ],
-      "id": "43d04008-27f1-4fa5-b4a9-1175b3e4dc29",
+      "id": "b96fbecd-1be2-4604-9eb7-672f5a0a8972",
       "name": "Remove Duplicates"
     },
     {
@@ -121,10 +121,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        3776,
-        2432
+        7824,
+        4032
       ],
-      "id": "c8d767f5-d880-4bdc-bcfc-46d5563c8aba",
+      "id": "a36086b7-6956-4f38-8409-209047b35cfe",
       "name": "HTTP Request",
       "retryOnFail": true,
       "waitBetweenTries": 3000,
@@ -137,10 +137,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        4000,
-        2432
+        8048,
+        4032
       ],
-      "id": "fd433327-b149-436c-b5f4-98a2a2b5f8ba",
+      "id": "ee825a40-8227-438b-9271-99fb9b3d6c78",
       "name": "Parse DeepSeek Response"
     },
     {
@@ -179,10 +179,10 @@
       "type": "n8n-nodes-base.filter",
       "typeVersion": 2.3,
       "position": [
-        4256,
-        2432
+        8304,
+        4032
       ],
-      "id": "fd9e5aa1-83e6-424c-ae64-70d35edeb039",
+      "id": "b96396cb-c4dc-42e0-a618-f67e1268c67d",
       "name": "Filter",
       "alwaysOutputData": true
     },
@@ -193,10 +193,10 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        4736,
-        2416
+        8784,
+        4016
       ],
-      "id": "fb761a66-e074-48f2-8661-0a98c3a9cf22",
+      "id": "af0b8e51-bb5a-4ca9-805c-fc36c5848b8a",
       "name": "Start domain search",
       "retryOnFail": true,
       "waitBetweenTries": 2000,
@@ -215,10 +215,10 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        4960,
-        2416
+        9008,
+        4016
       ],
-      "id": "a215d062-c520-4b95-a248-32acf2401226",
+      "id": "9cc62fc0-3ec9-4443-bfdc-6941dc4b8c53",
       "name": "Wait",
       "webhookId": "ae8f5566-1dd8-4e61-be6f-11d2db1c7bd6"
     },
@@ -230,10 +230,10 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        5184,
-        2416
+        9232,
+        4016
       ],
-      "id": "9b0105f1-a045-4f5e-b8ab-eea473b840ec",
+      "id": "0e186938-2128-43ce-aa68-893d611b6b90",
       "name": "Get domain search result",
       "retryOnFail": true,
       "waitBetweenTries": 2000,
@@ -254,10 +254,10 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        5552,
-        2416
+        9600,
+        4016
       ],
-      "id": "097e5b6f-1481-478c-a4f9-4a9cf9838e29",
+      "id": "047328d1-9660-4bf8-a258-b8eb6a25a7fa",
       "name": "Start prospect profiles",
       "retryOnFail": true,
       "waitBetweenTries": 2000,
@@ -276,10 +276,10 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        5728,
-        2432
+        9776,
+        4032
       ],
-      "id": "46e72eaf-8a95-4006-9552-9e5161a9f474",
+      "id": "404f6b14-af42-4c92-aa2e-70d760dbcd0f",
       "name": "Wait1",
       "webhookId": "d2d11e33-f8ff-45ba-b591-b5a86df6393a"
     },
@@ -291,10 +291,10 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        5936,
-        2416
+        9984,
+        4016
       ],
-      "id": "fbfa1aec-d5de-463a-8625-0d28db3b033e",
+      "id": "31493d00-5769-49e1-b631-c6383162e0f8",
       "name": "Get prospect profiles result",
       "retryOnFail": true,
       "waitBetweenTries": 2000,
@@ -314,10 +314,10 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        6784,
-        2400
+        10832,
+        4000
       ],
-      "id": "3735f7a6-9e71-49dd-857e-98ab256631b8",
+      "id": "a5c50ce4-6ca1-4d81-b057-c8cb87077baf",
       "name": "Start prospects emails",
       "retryOnFail": true,
       "waitBetweenTries": 2000,
@@ -337,10 +337,10 @@
       "type": "n8n-nodes-base.splitOut",
       "typeVersion": 1,
       "position": [
-        6560,
-        2400
+        10608,
+        4000
       ],
-      "id": "70dfbaae-5e18-49a3-8df2-184b49d31ceb",
+      "id": "f68a2f72-d701-4cec-917c-71403e7ab299",
       "name": "Split Out1"
     },
     {
@@ -350,10 +350,10 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        6944,
-        2400
+        10992,
+        4000
       ],
-      "id": "6621f3e6-353c-4069-9061-cc48ef677d65",
+      "id": "15231a2a-561f-480c-adac-d99f00de2e6f",
       "name": "Wait2",
       "webhookId": "2eaf0b40-c140-4dab-929f-46b0aec95da3"
     },
@@ -365,10 +365,10 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        7152,
-        2400
+        11200,
+        4000
       ],
-      "id": "bd47392a-60ac-42fb-8a9c-ce6aadcbb938",
+      "id": "75acff45-f3f6-42b9-a87a-7d57eed69614",
       "name": "Get prospect email search result",
       "retryOnFail": true,
       "waitBetweenTries": 2000,
@@ -465,10 +465,10 @@
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.4,
       "position": [
-        7376,
-        2400
+        11424,
+        4000
       ],
-      "id": "f7b24686-42d5-46d8-a60c-5847a0770c69",
+      "id": "c03ff81b-c5a8-461e-bbd9-8fcab501df34",
       "name": "Switch",
       "alwaysOutputData": false,
       "notesInFlow": false
@@ -481,10 +481,10 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        7696,
-        2432
+        11744,
+        4032
       ],
-      "id": "052d2ae0-5b18-46bc-800e-15b7d3306414",
+      "id": "3003c6bd-7895-40ee-9a3a-bc2fbf3ca9d9",
       "name": "Start email verification",
       "retryOnFail": true,
       "waitBetweenTries": 2000,
@@ -501,10 +501,10 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        7872,
-        2432
+        11920,
+        4032
       ],
-      "id": "194235ce-3600-41f4-9b5b-f257f7c7b5fd",
+      "id": "afde6e6a-1b8b-4a4c-9cfe-0e5661d32320",
       "name": "Wait3",
       "webhookId": "c87c305c-32f3-4c79-b35c-1dc9f485a729"
     },
@@ -517,10 +517,10 @@
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
       "position": [
-        8096,
-        2416
+        12144,
+        4016
       ],
-      "id": "9dd43be6-25a6-4687-b5d1-d5c01b856cef",
+      "id": "8c525dc1-642e-44be-917f-d1b77d871831",
       "name": "Get email verification result",
       "retryOnFail": true,
       "waitBetweenTries": 2000,
@@ -559,10 +559,10 @@
       "type": "n8n-nodes-base.filter",
       "typeVersion": 2.3,
       "position": [
-        8288,
-        2432
+        12336,
+        4032
       ],
-      "id": "186785d1-9ff0-4f4c-9864-0c24ca314e9f",
+      "id": "8a74da12-2b41-49a4-8053-348265728560",
       "name": "Keep Only Valid",
       "alwaysOutputData": true
     },
@@ -571,10 +571,10 @@
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3.2,
       "position": [
-        8576,
-        2288
+        12624,
+        3888
       ],
-      "id": "9f522130-be9a-4588-af66-22838fd97506",
+      "id": "caa7314d-7957-4068-9c99-146ebc806e21",
       "name": "Merge",
       "alwaysOutputData": true
     },
@@ -614,10 +614,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        10000,
-        2176
+        14048,
+        3776
       ],
-      "id": "b42cc73a-d2d3-4a7e-a872-9a190cb0bd6e",
+      "id": "d4aa703e-591f-4618-ae38-7aea61ac25e4",
       "name": "WhatsApp Validator",
       "retryOnFail": true,
       "waitBetweenTries": 3000
@@ -629,10 +629,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        9536,
-        2272
+        13584,
+        3872
       ],
-      "id": "65e001f5-0663-4e7e-9015-342e716064b9",
+      "id": "8adc7989-1281-424a-b806-e15fc27d36a4",
       "name": "Remove duplicate"
     },
     {
@@ -656,10 +656,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        3504,
-        2064
+        7552,
+        3664
       ],
-      "id": "046e520a-eff7-4d93-b6f0-0ba2750485f3",
+      "id": "9fc65241-7823-4ac6-ab93-83a0d5b771f9",
       "name": "searching companies",
       "retryOnFail": true,
       "executeOnce": true,
@@ -686,10 +686,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        4400,
-        2064
+        8448,
+        3664
       ],
-      "id": "895c520c-bfbd-4743-86fa-7fd26b88c540",
+      "id": "284afd13-539c-4df5-9eec-8188bdd52a6c",
       "name": "AI Analysing",
       "retryOnFail": true,
       "executeOnce": true,
@@ -716,10 +716,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        5328,
-        1824
+        9376,
+        3424
       ],
-      "id": "2325ddf2-7783-463c-8b1d-6c4cfac02d66",
+      "id": "68c1e55e-9f8b-48cc-b65f-a78078a12525",
       "name": "Domain Search",
       "retryOnFail": true,
       "executeOnce": true,
@@ -746,10 +746,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        6352,
-        1728
+        10400,
+        3328
       ],
-      "id": "225e6d38-0cf8-4882-a4d5-65c094cc9854",
+      "id": "7a98cbac-b9ea-4de6-b786-77d17338bb5d",
       "name": "Finding Decision Makers",
       "retryOnFail": true,
       "executeOnce": true,
@@ -776,10 +776,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        7616,
-        1808
+        11664,
+        3408
       ],
-      "id": "59034e7d-8584-4497-b118-d3ee7ea8f4c1",
+      "id": "920a80fd-0c0d-462c-a211-7a7acf6a751e",
       "name": "Finding Emails",
       "retryOnFail": true,
       "executeOnce": true,
@@ -806,10 +806,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        8912,
-        1712
+        12960,
+        3312
       ],
-      "id": "76c8e2f8-3783-420b-bba5-a1d3ea942f88",
+      "id": "db889823-c1c4-49ba-baed-c5f1ad2f9129",
       "name": "Verifying Contacts",
       "retryOnFail": true,
       "executeOnce": true,
@@ -822,10 +822,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        10256,
-        2288
+        14304,
+        3888
       ],
-      "id": "017fdbff-fe2d-49ad-a538-0127ff794526",
+      "id": "b6c81c78-2798-4a54-8507-29720ba81e90",
       "name": "Group Leads & Apply Abandon Rule"
     },
     {
@@ -849,10 +849,10 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        10480,
-        2288
+        14528,
+        3888
       ],
-      "id": "70264f9b-0880-4dd7-aea6-47972658c628",
+      "id": "843e655e-e906-48b3-a0a4-8983c66c3f3d",
       "name": "Send Results to Backend",
       "executeOnce": true,
       "retryOnFail": true,
@@ -866,10 +866,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        5376,
-        2400
+        9424,
+        4000
       ],
-      "id": "cf9b4476-3a14-4a31-a388-482d30cc3540",
+      "id": "483ad3ae-6e5d-4a93-aa6e-bed4908b8c21",
       "name": "Filter the companies"
     },
     {
@@ -879,10 +879,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        6288,
-        2416
+        10336,
+        4016
       ],
-      "id": "c91c1765-2986-4f51-840a-958879f0eab8",
+      "id": "254fe169-3125-4999-babe-0bb7ccd26555",
       "name": "Filter & Limit Prospects"
     },
     {
@@ -913,10 +913,10 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        9760,
-        2272
+        13808,
+        3872
       ],
-      "id": "28dfefca-9b16-40b4-8009-fdd12bd44a0c",
+      "id": "b8aff46d-d176-4471-980c-53308eedbf56",
       "name": "If"
     },
     {
@@ -926,10 +926,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        9024,
-        2288
+        13072,
+        3888
       ],
-      "id": "aaa2a71a-1e2b-4189-904d-1e19c491d5fa",
+      "id": "9f9611ce-18e6-4609-ad16-0306f27451bc",
       "name": "Code in JavaScript"
     },
     {
@@ -939,12 +939,12 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        4480,
-        2432
+        8528,
+        4032
       ],
-      "id": "30df59b2-1d82-4c1f-b702-fd96b44f2c77",
+      "id": "7335f838-db47-42d6-8539-6d1acbd6c3ab",
       "name": "Guard: AI Qualified",
-      "executeOnce": true
+      "executeOnce": false
     },
     {
       "parameters": {
@@ -954,10 +954,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        8464,
-        2384
+        12512,
+        3984
       ],
-      "id": "0c17ac26-47af-433a-9149-22c86c2ea1b7",
+      "id": "e42a2f3f-9d87-4bef-ac79-09fc1735cdd0",
       "name": "Restore Prospect",
       "executeOnce": true
     },
@@ -968,10 +968,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        8800,
-        2288
+        12848,
+        3888
       ],
-      "id": "d40ce331-3ccb-47fe-8b74-5dd6ba09c345",
+      "id": "d70fae1b-a4b6-42a8-a703-0270255e7bc6",
       "name": "Guard: Valid Emails"
     }
   ],
@@ -1413,7 +1413,7 @@
     "availableInMCP": false,
     "errorWorkflow": "8jaVvfzmebEYKd5I"
   },
-  "versionId": "27192222-b373-4f55-8aef-b76b5a212319",
+  "versionId": "23a9c7b3-894e-4907-b6d8-b44aa569988b",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "637fc58fdfcd37c603408ad0e89fcc31830fb4ad32d730273f7b375c9871f3cb"

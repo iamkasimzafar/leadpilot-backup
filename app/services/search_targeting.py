@@ -91,6 +91,34 @@ CONTACT_ROLES: dict[str, ContactRole] = {
             "Product Marketing Manager",
         ),
     ),
+    "sales": ContactRole(
+        code="sales",
+        name="Sales",
+        titles=(
+            "Sales Manager",
+            "Head of Sales",
+            "Sales Director",
+            "Business Development Manager",
+            "VP Sales",
+            "Account Manager",
+            "Sales Executive",
+            "Regional Sales Manager",
+        ),
+    ),
+    "engineering": ContactRole(
+        code="engineering",
+        name="Engineering",
+        titles=(
+            "Engineering Manager",
+            "Head of Engineering",
+            "CTO",
+            "Technical Director",
+            "R&D Manager",
+            "Chief Engineer",
+            "VP Engineering",
+            "Product Engineer",
+        ),
+    ),
 }
 
 

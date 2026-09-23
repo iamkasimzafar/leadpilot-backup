@@ -289,6 +289,20 @@ class LeadSearchProgressService(BaseService):
                 commit=False,
             )
 
+        if run.search_type == SearchType.LOOKALIKE_DISCOVERY.value:
+            # This checkpoint-driven notification fires from `record()` on the
+            # workflow's own "completed" stage callback, which precedes the
+            # results POST that actually stores the domain list -- so the
+            # count here is not yet reliable and is left out.
+            return await self.notifications.create(
+                run.user_id,
+                kind=NotificationKind.LEAD,
+                title=f'Similar companies for "{run.original_keyword}" are ready',
+                subtitle="Review the list and pick which ones to find contacts for.",
+                link="/lead-radar",
+                commit=False,
+            )
+
         return await self.notifications.create(
             run.user_id,
             kind=NotificationKind.LEAD,

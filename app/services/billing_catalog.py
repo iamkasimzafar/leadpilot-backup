@@ -60,6 +60,20 @@ AI_KEYWORD_EXPANSION_CREDITS = 5
 BASE_CONTACT_CREDIT = 10
 WHATSAPP_VALIDATION_CREDITS = 5
 
+# --- Lookalike companies ------------------------------------------------------
+# Step 1 (discovery): a competitor's domain in, a list of similar company
+# websites out. Charged once, flat, when the list lands -- like AI keyword
+# expansion, not settled from a count, because there is nothing here yet to
+# count (no companies or contacts are created by discovery itself).
+#
+# Step 2 (find contacts for selected): the domains the user picked, run
+# through the same Snov.io chain a b2b search uses. Billed exactly like a b2b
+# search -- BASE_CONTACT_CREDIT / WHATSAPP_VALIDATION_CREDITS above, nothing
+# extra. This is a placeholder rate for the whole lookalike feature; the
+# customs-code and company-name search methods mentioned alongside it are
+# unified at 10 credits for now and will be revisited.
+LOOKALIKE_DISCOVERY_CREDITS = 5
+
 # Starting assumptions for the pre-dispatch estimate, used until an account has
 # completed runs of its own to learn from.
 DEFAULT_COMPANIES_PER_KEYWORD = 10
@@ -99,6 +113,7 @@ __all__ = [
     "CREDITS_PER_DOLLAR",
     "DEFAULT_COMPANIES_PER_KEYWORD",
     "DEFAULT_CONTACTS_PER_COMPANY",
+    "LOOKALIKE_DISCOVERY_CREDITS",
     "PACKS",
     "PLANS",
     "WHATSAPP_VALIDATION_CREDITS",

@@ -30,24 +30,37 @@ from app.schemas.lead_radar import (
     CategoryList,
     ExpandKeywordRequest,
     ExpandKeywordResponse,
+    LookalikeDiscoveryResultsRequest,
+    LookalikeDiscoveryResultsResponse,
     ProgressCallbackRequest,
     QuoteRequest,
     SearchEventRead,
     SearchQuote,
     SearchRunPage,
     SearchRunRead,
+    StartHsCodeSearchRequest,
+    StartHsCodeSearchResponse,
+    StartLookalikeContactsRequest,
+    StartLookalikeContactsResponse,
+    StartLookalikeDiscoveryRequest,
+    StartLookalikeDiscoveryResponse,
     StartSearchRequest,
     StartSearchResponse,
+    TranslateHsCodeRequest,
+    TranslateHsCodeResponse,
     WorkflowErrorRequest,
     WorkflowErrorResponse,
 )
 from app.services import local_business
 from app.services.billing import BillingService
 from app.services.billing_catalog import AI_KEYWORD_EXPANSION_CREDITS
+from app.services.hs_code import HsCodeService
+from app.services.hs_code_search import HsCodeSearchService
 from app.services.keyword_expansion import KeywordExpansionService
 from app.services.lead_results import LeadResultsService, is_deadlock
 from app.services.lead_search import LeadSearchService
 from app.services.lead_search_progress import LeadSearchProgressService
+from app.services.lookalike import LookalikeService
 from app.services.progress_stream import progress_stream
 from app.services.search_pricing import SearchPricingService
 from app.services.workflow_errors import WorkflowErrorService, explain
@@ -275,6 +288,157 @@ async def start_search(
 
     if started.n8n_execution_id:
         await progress.attach_execution_id(run, started.n8n_execution_id)
+
+    return started
+
+
+# --- Lookalike companies -------------------------------------------------------
+@router.post(
+    "/lookalike/discover",
+    response_model=StartLookalikeDiscoveryResponse,
+    summary="Step 1: find companies similar to a competitor's domain",
+)
+async def start_lookalike_discovery(
+    payload: StartLookalikeDiscoveryRequest, db: DbSession, current_user: CurrentUser
+) -> StartLookalikeDiscoveryResponse:
+    """Dispatch the discovery half of Lookalike Companies.
+
+    Returns a list of similar company websites for the user to review -- no
+    credits are spent on any of them yet, and nothing is added to My Leads.
+    The user picks which ones are worth pursuing and calls
+    POST /lookalike/contacts with just those.
+    """
+    return await LookalikeService(db).start_discovery(current_user.id, payload.domain)
+
+
+@router.post(
+    "/lookalike/discover/results",
+    response_model=LookalikeDiscoveryResultsResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Results callback for the discovery half of the n8n workflow",
+)
+async def submit_lookalike_discovery_results(
+    payload: LookalikeDiscoveryResultsRequest,
+    db: DbSession,
+    x_leadpilot_run_token: str = Header(..., alias="X-LeadPilot-Run-Token"),
+    x_leadpilot_run_id: str | None = Header(None, alias="X-LeadPilot-Run-Id"),
+) -> LookalikeDiscoveryResultsResponse:
+    """Called once by n8n with the domain list discovery found, or a failure.
+
+    Same auth and run_id-from-header-or-body pattern as the ordinary results
+    callback. Stores the list and charges the flat discovery fee -- nothing
+    per-domain, because nothing per-domain has been looked at yet.
+    """
+    run_id = payload.run_id or x_leadpilot_run_id
+    if not run_id:
+        raise ValidationError(
+            "run_id is required: send it in the body or as X-LeadPilot-Run-Id."
+        )
+
+    run = await LeadSearchProgressService(db).runs.get_for_callback(
+        run_id, x_leadpilot_run_token
+    )
+    if run is None:
+        log.warning("lookalike.discovery_results_rejected", run_id=run_id)
+        raise UnauthorizedError("Invalid run or token.")
+
+    return await LookalikeService(db).ingest_discovery_results(run, payload)
+
+
+@router.post(
+    "/lookalike/contacts",
+    response_model=StartLookalikeContactsResponse,
+    summary="Step 2: find decision-maker contacts for selected lookalike companies",
+)
+async def start_lookalike_contacts(
+    payload: StartLookalikeContactsRequest, db: DbSession, current_user: CurrentUser
+) -> StartLookalikeContactsResponse:
+    """Dispatch the contacts half of Lookalike Companies.
+
+    Only the domains the user explicitly selected are sent on -- this is the
+    step that actually spends credits, billed exactly like a b2b search
+    (per verified-email contact found, once results arrive).
+    """
+    return await LookalikeService(db).start_contacts(current_user.id, payload)
+
+
+# --- HS Code search (Advanced Filters) ------------------------------------------
+@router.post(
+    "/hs-code/translate",
+    response_model=TranslateHsCodeResponse,
+    summary="AI-translate a product description into candidate HS codes",
+)
+async def translate_hs_code(
+    payload: TranslateHsCodeRequest, current_user: CurrentUser
+) -> TranslateHsCodeResponse:
+    """Phase 1: turn free text into up to 3 candidate 6-digit HS codes for the
+    user to review and pick from. Free -- no search has run yet, so there is
+    nothing to charge for. The user must click a candidate before Find Target
+    Buyers can be used.
+    """
+    return await HsCodeService().translate(payload.text)
+
+
+@router.post(
+    "/hs-code/search",
+    response_model=StartHsCodeSearchResponse,
+    summary="Start an HS Code search via the n8n workflow",
+)
+async def start_hs_code_search(
+    payload: StartHsCodeSearchRequest, db: DbSession, current_user: CurrentUser
+) -> StartHsCodeSearchResponse:
+    """Phase 2: dispatch the confirmed HS code (plus country and extraction
+    filters) to the HS Code search webhook.
+
+    Nothing is charged here: the bill is settled when the results arrive,
+    exactly like a b2b search. A search the balance could not cover is
+    refused up front (402), against the same per-keyword estimate the
+    keyword flow uses (an HS code counts as one keyword).
+    """
+    progress = LeadSearchProgressService(db)
+
+    billing = BillingService(db)
+    quote = await SearchPricingService(db).quote(
+        current_user.id,
+        keyword_count=1,
+        validate_whatsapp=payload.validate_whatsapp,
+        balance=await billing.balance(current_user.id),
+    )
+    if not quote.affordable:
+        raise InsufficientCreditsError(
+            details={
+                "balance": quote.balance,
+                "required": quote.total,
+                "shortfall": quote.shortfall,
+            }
+        )
+
+    run = await progress.create_run(
+        current_user.id,
+        f"HS {payload.hs_code}",
+        [payload.hs_code],
+        auto_add_to_leads=True,
+        country=payload.country,
+        company_type=payload.company_type,
+        contact_role=payload.contact_role,
+        company_size=payload.company_size,
+        validate_whatsapp=payload.validate_whatsapp,
+        search_type="hs_code",
+    )
+
+    try:
+        started = await HsCodeSearchService().start(
+            payload,
+            user_id=str(current_user.id),
+            run_id=run.id,
+            callback_token=run.callback_token,
+        )
+    except (UpstreamError, ServiceUnavailableError) as exc:
+        try:
+            await progress.mark_dispatch_failed(run, exc.message)
+        except Exception:
+            log.exception("hs_code_search.mark_dispatch_failed_failed", run_id=run.id)
+        raise
 
     return started
 

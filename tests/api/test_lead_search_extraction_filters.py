@@ -79,9 +79,15 @@ async def _dispatch(**kwargs: Any) -> tuple[dict, Any]:
 # --- The catalogues ----------------------------------------------------------
 
 
-def test_the_three_roles_are_defined() -> None:
+def test_the_five_roles_are_defined() -> None:
     """"Any" is not a role: it is the absence of a filter."""
-    assert set(CONTACT_ROLES) == {"c_level", "procurement", "marketing"}
+    assert set(CONTACT_ROLES) == {
+        "c_level",
+        "procurement",
+        "marketing",
+        "sales",
+        "engineering",
+    }
     assert not is_valid_role("any")
 
 

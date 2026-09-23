@@ -1,5 +1,6 @@
 """Lead Radar schemas: AI keyword expansion and search-run progress."""
 
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -11,7 +12,13 @@ from app.services.company_types import is_valid as is_valid_company_type
 from app.services.countries import is_valid
 from app.services.search_targeting import is_valid_role, is_valid_size
 
-SearchTypeLiteral = Literal["b2b", "local"]
+SearchTypeLiteral = Literal[
+    "b2b", "local", "lookalike_discovery", "lookalike_contacts", "hs_code"
+]
+
+# Domain length: RFC 1035 caps a full name at 253 chars; comfortable headroom
+# for how it arrives from the address bar or a stray scheme/path.
+MAX_DOMAIN_LENGTH = 255
 
 # More categories than this stops being a filter and becomes a second keyword
 # list; it also keeps the `subtypes` query string a sane length.
@@ -122,9 +129,7 @@ class ExpandedTerm(BaseModel):
 
 
 class StartSearchRequest(BaseModel):
-    original_keyword: str = Field(
-        min_length=1, max_length=MAX_ORIGINAL_KEYWORD_LENGTH
-    )
+    original_keyword: str = Field(min_length=1, max_length=MAX_ORIGINAL_KEYWORD_LENGTH)
     # The terms the user ticked in step 2. The original keyword is prepended
     # server-side, so the client sends only the selected expansions.
     expanded_keywords: list[str] = Field(
@@ -313,6 +318,113 @@ class CategoryList(BaseModel):
     total: int
 
 
+# --- Lookalike companies ------------------------------------------------------
+class StartLookalikeDiscoveryRequest(BaseModel):
+    """Step 1: a competitor's domain in, a list of similar companies out.
+
+    No credits are checked or spent here beyond the flat discovery fee --
+    there is nothing yet to size a bigger bill on. The user picks which
+    results to spend on next (step 2).
+    """
+
+    domain: str = Field(min_length=1, max_length=MAX_DOMAIN_LENGTH)
+
+    @field_validator("domain")
+    @classmethod
+    def _tidy_domain(cls, value: str) -> str:
+        # Accept whatever the user pasted -- a bare domain, a full URL, one
+        # with or without a scheme -- and hand the workflow a clean domain.
+        # It does its own fetch, so this only needs to be good enough to find
+        # the site, not a strict validator.
+        text = " ".join(value.split())
+        text = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", text)
+        text = text.split("/", 1)[0]
+        text = text.removeprefix("www.")
+        if not text or "." not in text:
+            raise ValueError("Enter a company domain, e.g. competitor.com.")
+
+        return text.lower()
+
+
+class DiscoveredDomain(BaseModel):
+    """One similar company the discovery run found."""
+
+    domain: str
+    url: str | None = None
+    title: str | None = None
+    snippet: str | None = None
+
+
+class StartLookalikeDiscoveryResponse(BaseModel):
+    dispatched: bool
+    run_id: str
+    domain: str
+
+
+class LookalikeDiscoveryResultsRequest(BaseModel):
+    """What the discovery workflow posts back.
+
+    Mirrors SearchResultsRequest's two shapes (success / failure) but for a
+    plain domain list rather than companies and contacts -- discovery creates
+    no Company or DecisionMaker rows.
+    """
+
+    run_id: str | None = Field(default=None, max_length=36)
+    status: str = Field(default="completed", max_length=16)
+    domains: list[DiscoveredDomain] = Field(default_factory=list, max_length=200)
+    error: str | None = Field(default=None, max_length=500)
+    reason: str | None = Field(default=None, max_length=64)
+    error_text: str | None = Field(default=None, max_length=500)
+
+    @property
+    def is_failed(self) -> bool:
+        return self.status == "failed" or bool(self.error) or bool(self.reason)
+
+
+class LookalikeDiscoveryResultsResponse(BaseModel):
+    run_id: str
+    status: str
+    domains_found: int
+
+
+class StartLookalikeContactsResponse(BaseModel):
+    dispatched: bool
+    run_id: str
+    source_run_id: str
+    domain_count: int
+
+
+class StartLookalikeContactsRequest(BaseModel):
+    """Step 2: the domains the user selected from a discovery run's results."""
+
+    source_run_id: str = Field(min_length=1, max_length=36)
+    # The domains to run through Snov.io, exactly as the user checked them.
+    # Bounded generously above the discovery cap (200) since a user could in
+    # principle select from more than one discovery run's combined history --
+    # today's UI only ever sends one run's worth.
+    domains: list[str] = Field(min_length=1, max_length=200)
+    validate_whatsapp: bool = False
+
+    @field_validator("domains")
+    @classmethod
+    def _clean_domains(cls, value: list[str]) -> list[str]:
+        cleaned = [" ".join(d.split()).lower() for d in value]
+        cleaned = [d for d in cleaned if d]
+        if not cleaned:
+            raise ValueError("Select at least one company.")
+
+        # De-duplicated, order preserved -- a user double-clicking a checkbox
+        # should not pay twice.
+        seen: set[str] = set()
+        unique = []
+        for d in cleaned:
+            if d not in seen:
+                seen.add(d)
+                unique.append(d)
+
+        return unique
+
+
 # --- Pricing -----------------------------------------------------------------
 class QuoteRequest(BaseModel):
     """The inputs of StartSearchRequest that affect the price.
@@ -322,9 +434,7 @@ class QuoteRequest(BaseModel):
     on screen can then never disagree with the decision to allow the search.
     """
 
-    original_keyword: str = Field(
-        min_length=1, max_length=MAX_ORIGINAL_KEYWORD_LENGTH
-    )
+    original_keyword: str = Field(min_length=1, max_length=MAX_ORIGINAL_KEYWORD_LENGTH)
     expanded_keywords: list[str] = Field(
         default_factory=list, max_length=MAX_EXPANDED_KEYWORDS
     )
@@ -390,8 +500,9 @@ class SearchRunRead(BaseSchema):
     company_size: str | None = None
     # Whether the run asked for WhatsApp validation.
     validate_whatsapp: bool = False
-    # "b2b" or "local", and for a local run the area, Google categories and
-    # rating / review window it was scoped to.
+    # "b2b", "local", "lookalike_discovery" or "lookalike_contacts", and for a
+    # local run the area, Google categories and rating / review window it was
+    # scoped to.
     search_type: str = "b2b"
     location: str | None = None
     business_categories: list[str] = Field(default_factory=list)
@@ -399,6 +510,12 @@ class SearchRunRead(BaseSchema):
     max_rating: float | None = None
     min_reviews: int | None = None
     max_reviews: int | None = None
+    # Lookalike discovery only: the similar companies the run found, once they
+    # have arrived. Empty until then, and on every other kind of run.
+    discovered_domains: list[DiscoveredDomain] = Field(default_factory=list)
+    # Lookalike contacts only: the discovery run these domains were picked
+    # from, so the UI can link back to "the list you chose from".
+    source_run_id: str | None = None
     # Settlement, once the results arrived successfully. Zero and null until
     # then; nothing is charged for a failed run.
     credits_charged: int = 0
@@ -436,6 +553,140 @@ class SearchRunPage(BaseModel):
     total: int
     page: int
     per_page: int
+
+
+# --- HS Code search ------------------------------------------------------------
+class TranslateHsCodeRequest(BaseModel):
+    """Free-text product description the user typed into the HS Code box."""
+
+    text: str = Field(min_length=1, max_length=200)
+
+    @field_validator("text")
+    @classmethod
+    def _tidy(cls, value: str) -> str:
+        cleaned = " ".join(value.split())
+        if not cleaned:
+            raise ValueError("Enter a product description.")
+
+        return cleaned
+
+
+class HsCodeCandidate(BaseModel):
+    """One of the (up to 3) codes the AI offers for the user to pick from."""
+
+    code: str = Field(min_length=6, max_length=6)
+    description: str
+
+
+class TranslateHsCodeResponse(BaseModel):
+    valid: bool
+    candidates: list[HsCodeCandidate] = Field(default_factory=list)
+    # Set when valid is False: nothing looked like a real product description.
+    reason: str | None = None
+
+
+class StartHsCodeSearchRequest(BaseModel):
+    """Step 2: the HS code the user confirmed by clicking a candidate, plus
+    the same extraction filters the keyword flow already has."""
+
+    hs_code: str = Field(min_length=6, max_length=6)
+    hs_description: str = Field(default="", max_length=255)
+
+    # What the user typed ("LED screen"), as a hint for the workflow's own
+    # AI step. The HS code itself is NEVER searched: measured against Serper,
+    # the digits return tariff lookups and customs portals rather than buyers
+    # (0-5 usable company sites out of 10), and the official nomenclature
+    # wording returns 0 of 10. The workflow translates the code into 2-3
+    # commercial product names and searches those instead.
+    product_term: str = Field(default="", max_length=120)
+
+    # None means worldwide: no site: restriction is added to the query.
+    country: str | None = Field(default=None, max_length=2)
+
+    # Which kind of buyer to aim at. Drives the OR-group of trade words the
+    # workflow appends to each product term (distributor/wholesaler/importer,
+    # OEM/ODM, retailer/reseller, installer/integrator). None targets any.
+    company_type: str | None = Field(default=None, max_length=32)
+
+    contact_role: str | None = Field(default=None, max_length=32)
+    company_size: str | None = Field(default=None, max_length=16)
+
+    # Only a verified email is ever billable regardless of this flag (see
+    # billing_catalog.py) -- kept for parity with the other search panels,
+    # which all offer the same yes/no framing even though "no" changes nothing
+    # about what is charged.
+    require_verified_email: bool = True
+
+    result_limit: int = Field(default=50, ge=10, le=500)
+
+    validate_whatsapp: bool = False
+
+    @field_validator("hs_code")
+    @classmethod
+    def _digits_only(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned.isdigit():
+            raise ValueError("HS code must be 6 digits.")
+
+        return cleaned
+
+    @field_validator("company_type")
+    @classmethod
+    def _known_company_type(cls, value: str | None) -> str | None:
+        return _normalise_company_type(value)
+
+    @field_validator("contact_role")
+    @classmethod
+    def _known_role(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        code = value.strip().lower()
+        if not code or code == "any":
+            return None
+
+        if not is_valid_role(code):
+            raise ValueError("Unknown contact role.")
+
+        return code
+
+    @field_validator("company_size")
+    @classmethod
+    def _known_size(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        code = value.strip().lower()
+        if not code or code == "any":
+            return None
+
+        if not is_valid_size(code):
+            raise ValueError("Unknown company size.")
+
+        return code
+
+    @field_validator("country")
+    @classmethod
+    def _known_country(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        code = value.strip().lower()
+        if not code or code == "all":
+            return None
+
+        if not is_valid(code):
+            raise ValueError("Unknown country code.")
+
+        return code
+
+
+class StartHsCodeSearchResponse(BaseModel):
+    dispatched: bool
+    run_id: str
+    hs_code: str
+    country: str | None = None
+    country_name: str | None = None
 
 
 def _unresolved(value: Any) -> bool:

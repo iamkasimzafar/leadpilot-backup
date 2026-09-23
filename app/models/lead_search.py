@@ -63,6 +63,11 @@ class SearchStage(StrEnum):
     # Local Offline Business searches only: applying the rating / review-count
     # window to what Google Maps returned.
     FILTERING_RESULTS = "filtering_results"
+    # Lookalike discovery (step 1) only: reading the competitor's site, then
+    # turning it into a buyer-focused search query, then running that search.
+    SCRAPING_SITE = "scraping_site"
+    GENERATING_QUERY = "generating_query"
+    SEARCHING_SIMILAR = "searching_similar"
     COMPLETED = "completed"
 
 
@@ -73,6 +78,21 @@ class SearchType(StrEnum):
     B2B = "b2b"
     # Local Offline Business: Google Maps listings in one area.
     LOCAL = "local"
+    # Lookalike companies, step 1: a competitor's domain in, a list of similar
+    # company websites out. No contacts, no billing beyond the flat discovery
+    # fee -- the user picks which of these to spend credits on next.
+    LOOKALIKE_DISCOVERY = "lookalike_discovery"
+    # Lookalike companies, step 2: the domains the user selected from a
+    # discovery run's results, run through the same Snov.io contact-finding
+    # chain a b2b search uses. Billed exactly like a b2b search.
+    LOOKALIKE_CONTACTS = "lookalike_contacts"
+    # Advanced Filters / HS Code search: a user-confirmed 6-digit HS code (see
+    # services/hs_code.py for the free AI-translation step that produces the
+    # candidates) drives a Google dork via Serper instead of a keyword search,
+    # scoped to the selected country's ccTLD. Everything after the dork --
+    # domain search through verification -- is the same Snov.io chain a b2b
+    # search uses, and it is billed exactly like one.
+    HS_CODE = "hs_code"
 
 
 # Display order for the progress tracker. `queued` is implicit (the run starts
@@ -96,10 +116,43 @@ LOCAL_STAGE_ORDER: tuple[SearchStage, ...] = (
     SearchStage.VERIFYING_CONTACTS,
 )
 
+# Lookalike discovery (step 1): read the site, build a query from it, run the
+# search. No company or contact discovery here -- that is step 2, which is a
+# b2b run in every respect (see STAGE_ORDER) once the user has picked domains.
+LOOKALIKE_DISCOVERY_STAGE_ORDER: tuple[SearchStage, ...] = (
+    SearchStage.SCRAPING_SITE,
+    SearchStage.GENERATING_QUERY,
+    SearchStage.SEARCHING_SIMILAR,
+)
+
+# HS Code search: the code was already confirmed by the user before dispatch
+# (see services/hs_code.py), so there is no AI-qualification step here the
+# way a b2b keyword search has -- straight from the Google dork to Snov.io.
+HS_CODE_STAGE_ORDER: tuple[SearchStage, ...] = (
+    SearchStage.SEARCHING_COMPANIES,
+    # A bare HS-code dork surfaces tariff lookups and customs-data portals far
+    # more than a keyword search does, so the workflow runs the same AI
+    # qualification pass a b2b search does before spending Snov.io calls.
+    SearchStage.AI_ANALYSING,
+    SearchStage.DOMAIN_SEARCH,
+    SearchStage.FINDING_DECISION_MAKERS,
+    SearchStage.FINDING_EMAILS,
+    SearchStage.VERIFYING_CONTACTS,
+)
+
 
 def stage_order_for(search_type: str | None) -> tuple[SearchStage, ...]:
     """The checkpoints a run of this kind reports, in order."""
-    return LOCAL_STAGE_ORDER if search_type == SearchType.LOCAL.value else STAGE_ORDER
+    if search_type == SearchType.LOCAL.value:
+        return LOCAL_STAGE_ORDER
+    if search_type == SearchType.LOOKALIKE_DISCOVERY.value:
+        return LOOKALIKE_DISCOVERY_STAGE_ORDER
+    if search_type == SearchType.HS_CODE.value:
+        return HS_CODE_STAGE_ORDER
+
+    # b2b and lookalike_contacts both run the same Snov.io contact-finding
+    # chain, so they share the same checkpoints.
+    return STAGE_ORDER
 
 
 class RunStatus(StrEnum):
@@ -134,9 +187,11 @@ class LeadSearchRun(Base, TimestampMixin):
         String(64), index=True, nullable=True
     )
 
-    # Which workflow handles the run: "b2b" or "local" (see SearchType).
+    # Which workflow handles the run (see SearchType). 32 rather than the
+    # longest current value's length: "lookalike_discovery" is 20 chars, and
+    # the next kind added should not need another migration just to fit.
     search_type: Mapped[str] = mapped_column(
-        String(16), default=SearchType.B2B.value, server_default="b2b", nullable=False
+        String(32), default=SearchType.B2B.value, server_default="b2b", nullable=False
     )
 
     # Local searches only. `location` is the area as the user typed it
@@ -156,6 +211,21 @@ class LeadSearchRun(Base, TimestampMixin):
     # MySQL and the SQLite used by the tests, and never queried by content.
     keywords_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     keyword_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # Lookalike discovery (step 1) only: the domains the workflow found,
+    # JSON-encoded ({domain, url, title, snippet} per entry). This is the list
+    # the user picks from before step 2 spends anything -- discovery itself
+    # creates no Company/DecisionMaker rows, so this is the only record of
+    # what a discovery run actually returned.
+    discovered_domains_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Lookalike contacts (step 2) only: the discovery run these domains were
+    # picked from, kept so the UI can link back to "the list you chose from".
+    # Not a foreign key with a cascade -- a deleted discovery run should not
+    # take a billed contacts run down with it.
+    source_run_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("lead_search_run.id", ondelete="SET NULL"), nullable=True
+    )
 
     # The "Auto-add to My Leads" checkbox at dispatch. When set, every company
     # the workflow returns lands in My Leads without the user doing anything.
@@ -248,6 +318,23 @@ class LeadSearchRun(Base, TimestampMixin):
             return []
 
         return [str(item) for item in value] if isinstance(value, list) else []
+
+    @property
+    def discovered_domains(self) -> list[dict[str, object]]:
+        """A lookalike discovery run's results; [] otherwise or before they
+        have arrived."""
+        if not self.discovered_domains_json:
+            return []
+
+        try:
+            value = json.loads(self.discovered_domains_json)
+        except ValueError:
+            return []
+
+        if not isinstance(value, list):
+            return []
+
+        return [item for item in value if isinstance(item, dict)]
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"<LeadSearchRun {self.id} {self.status}/{self.stage}>"
