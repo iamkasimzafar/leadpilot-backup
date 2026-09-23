@@ -11,6 +11,7 @@ from app.api.v1.routes import (
     leads,
     notification_preferences,
     notifications,
+    radar_monitors,
     reports,
     users,
 )
@@ -20,6 +21,9 @@ api_router = APIRouter()
 api_router.include_router(health.router, tags=["health"])
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(users.router, prefix="/users", tags=["users"])
+# Mounted before lead_radar, which owns the rest of "/lead-radar": this router
+# carries its own "/lead-radar/monitors" prefix, and first match wins.
+api_router.include_router(radar_monitors.router)
 api_router.include_router(lead_radar.router, prefix="/lead-radar", tags=["lead-radar"])
 api_router.include_router(billing.router, prefix="/billing", tags=["billing"])
 api_router.include_router(leads.router, prefix="/leads", tags=["leads"])

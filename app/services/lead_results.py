@@ -368,6 +368,9 @@ class LeadResultsService(BaseService):
             self.db.add(
                 DecisionMaker(
                     company_id=company.id,
+                    # Denormalised so the radar-monitor dedupe can ask "does
+                    # this user already have this email?" without a join.
+                    user_id=company.user_id,
                     full_name=person.full_name,
                     job_title=person.job_title,
                     verified_email=person.verified_email,

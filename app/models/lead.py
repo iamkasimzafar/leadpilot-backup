@@ -115,11 +115,30 @@ class Company(Base, TimestampMixin):
 class DecisionMaker(Base):
     """A contact at a company, as returned by the workflow."""
 
-    __table_args__ = (Index("ix_decision_maker_company_id", "company_id"),)
+    __table_args__ = (
+        Index("ix_decision_maker_company_id", "company_id"),
+        # Radar monitors dedupe on the contact's email before inserting, so
+        # the user is never billed twice for the same person. That check runs
+        # per candidate email on every monitor run, so it needs an index.
+        #
+        # Deliberately NOT unique. The same person legitimately appears under
+        # two company domains -- production already holds such pairs -- and a
+        # manual search must stay free to record them. Uniqueness here would
+        # reject those rows and break the existing ingest path; the guarantee
+        # the monitor needs is enforced in MonitorResultsService instead.
+        Index("ix_decision_maker_user_id_email", "user_id", "verified_email"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid_str)
     company_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("company.id", ondelete="CASCADE"), nullable=False
+    )
+
+    # Denormalised from the owning company. The dedupe lookup is "has this
+    # user already got this email?", and MySQL cannot index across the join.
+    # Nullable so the backfill can run online; written on every insert.
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("user.id", ondelete="CASCADE"), nullable=True
     )
 
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)

@@ -1,0 +1,1291 @@
+{
+  "name": "LeadPilot - Radar Monitors",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 2 * * *"
+            }
+          ]
+        }
+      },
+      "id": "monitor-schedule-trigger",
+      "name": "Daily 02:00 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -640,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.LEADPILOT_API_URL }}/api/v1/lead-radar/monitors/due",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-LeadPilot-Token",
+              "value": "={{ $env.LEADPILOT_N8N_SECRET }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "monitor-fetch-due",
+      "name": "Fetch Due Monitors",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -420,
+        0
+      ],
+      "notes": "The backend claims each monitor as it hands it out, so a retry or an overlapping run cannot dispatch the same monitor twice and bill the user twice over."
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "monitors",
+        "options": {}
+      },
+      "id": "monitor-split",
+      "name": "Split Monitors",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        -200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "monitor-loop",
+      "name": "Loop Monitors",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        20,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://google.serper.dev/search",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-KEY",
+              "value": "={{ $env.SERPER_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\nJSON.stringify((() => {\n  const m = $('Loop Monitors').item.json;\n\n  // Company-type OR-group, same idea as the manual search. A monitor has no\n  // company_type of its own, so the plain term is used.\n  const q = m.search_term;\n\n  return {\n    q,\n    gl: m.country || undefined,\n    num: Math.min(m.limit_per_run || 50, 100),\n    // The whole point of the monitor: start where the last run stopped.\n    page: m.serper_page || 1\n  };\n})())\n}}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        7152,
+        4032
+      ],
+      "id": "e620d7e3-bfe7-44c1-9900-70ac80728cbb",
+      "name": "serper",
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "maxTries": 3,
+      "onError": "continueRegularOutput",
+      "notes": "`page` comes from the monitor's stored serper_offset. Without it every run re-reads the same top results and finds nothing new from day two on."
+    },
+    {
+      "parameters": {
+        "jsCode": "const blacklist = [\n  'linkedin.com', 'facebook.com', 'youtube.com', 'instagram.com', 'twitter.com', 'tiktok.com', 'x.com', 'pinterest.com',\n  'alibaba.com', 'amazon.com', 'made-in-china.com', 'globalsources.com', 'thomasnet.com', \n  'yellowpages.com', 'yelp.com', 'trustpilot.com', 'crunchbase.com', 'bloomberg.com', \n  'wikipedia.org', 'reddit.com', 'quora.com', 'medium.com', 'tradeimex.in', 'seair.co.in',\n  'worldbank.org', 'zippia.com', 'unicargo.com', 'ebay.com', 'walmart.com'\n];\n\nconst forbiddenTLDs = ['.gov', '.edu'];\nconst output = [];\n\n// Loop through all incoming Serper keyword outputs\nfor (const item of $input.all()) {\n  const searchResults = item.json.organic || [];\n  const currentKeyword = item.json.searchParameters?.q || $('Loop Monitors').item.json.original_keyword;\n\n  const cleanResults = searchResults.filter(result => {\n    if (!result.link) return false;\n    const url = result.link.toLowerCase();\n    \n    const isBlacklisted = blacklist.some(domain => url.includes(domain));\n    const isForbiddenTLD = forbiddenTLDs.some(tld => url.includes(tld));\n\n    return !isBlacklisted && !isForbiddenTLD;\n  });\n\n  cleanResults.forEach(result => {\n  let hostname = result.link || '';\n  try {\n    // Clean string and strip www.\n    const parsed = new URL(hostname);\n    hostname = parsed.hostname.replace(/^www\\./, '');\n  } catch (e) {\n    // Regex fallback if URL constructor fails\n    hostname = hostname.replace(/^(?:https?:\\/\\/)?(?:www\\.)?([^\\/]+).*/i, '$1');\n  }\n\n  output.push({\n    json: {\n      original_keyword: currentKeyword,\n      url: result.link,\n      title: result.title,\n      snippet: result.snippet,\n      domain: hostname\n    }\n  });\n});\n}\n\nif (!output.length) {\n  throw new Error('LeadPilot Error: no_companies_found - the web search returned no usable company websites for these keywords.');\n}\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        7408,
+        4032
+      ],
+      "id": "bb27b68f-5f54-4e2a-9c86-19919885ffdf",
+      "name": "Backlisting"
+    },
+    {
+      "parameters": {
+        "compare": "selectedFields",
+        "fieldsToCompare": "domain",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.removeDuplicates",
+      "typeVersion": 2,
+      "position": [
+        7600,
+        4032
+      ],
+      "id": "b96fbecd-1be2-4604-9eb7-672f5a0a8972",
+      "name": "Remove Duplicates"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.deepseek.com/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer sk-dced581dfdcb40e99e36d8fbd758c4e7"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\nJSON.stringify({\n  \"model\": \"deepseek-chat\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": `You are a B2B data analyst. Review the search result (URL, Title, Snippet).\n\nDetermine: Is this a legitimate, independent B2B company website (NOT a directory, marketplace, blog, news site, or social media profile)?\n\nCompany Type and Company Size are already targeted upstream, in the search query and in later filtering steps -- do not try to judge them here from a short snippet.\n\nRate overall relevance to the keyword on a scale of 1 to 10.\nReturn strictly JSON format: {\"score\": [1-10], \"is_company\": true/false}`\n    },\n    {\n      \"role\": \"user\",\n      \"content\": `Original Keyword: ${$json.original_keyword || $('Loop Monitors').item.json.original_keyword}\\nURL: ${$json.url || $json.link}\\nTitle: ${$json.title}\\nSnippet: ${$json.snippet}`\n    }\n  ],\n  \"response_format\": { \"type\": \"json_object\" }\n})\n}}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 5
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        7824,
+        4032
+      ],
+      "id": "a36086b7-6956-4f38-8409-209047b35cfe",
+      "name": "HTTP Request",
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "maxTries": 3
+    },
+    {
+      "parameters": {
+        "jsCode": "const output = [];\nconst items = $input.all();\n\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i];\n  // Fetch original domain data from the Remove Duplicates node\n  const origData = $(\"Remove Duplicates\").all()[i]?.json || {};\n  \n  let score = 0;\n  let isCompany = false;\n\n  try {\n    const rawContent = item.json.choices[0].message.content;\n    const parsed = JSON.parse(rawContent);\n    score = parsed.score || 0;\n    isCompany = Boolean(parsed.is_company);\n  } catch (e) {\n    score = 0;\n    isCompany = false;\n  }\n\n  output.push({\n    json: {\n      original_keyword: origData.original_keyword,\n      url: origData.url,\n      title: origData.title,\n      snippet: origData.snippet,\n      domain: origData.domain,\n      ai_score: score,\n      is_company: isCompany\n    }\n  });\n}\n\nreturn output;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8048,
+        4032
+      ],
+      "id": "ee825a40-8227-438b-9271-99fb9b3d6c78",
+      "name": "Parse DeepSeek Response"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "b1d37335-dd15-478b-bbf9-7ae570e66407",
+              "leftValue": "={{ $json.ai_score }}",
+              "rightValue": 5,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            },
+            {
+              "id": "92cfe415-d21a-4285-9b9a-bd5dc194531d",
+              "leftValue": "={{ $json.is_company }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.3,
+      "position": [
+        8304,
+        4032
+      ],
+      "id": "b96396cb-c4dc-42e0-a618-f67e1268c67d",
+      "name": "Filter",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "domain": "={{ $json.domain || $json.url.replace(/^https?:\\/\\//, '').split('/')[0] }}"
+      },
+      "type": "n8n-nodes-snovio.snovioApi",
+      "typeVersion": 1,
+      "position": [
+        8784,
+        4016
+      ],
+      "id": "af0b8e51-bb5a-4ca9-805c-fc36c5848b8a",
+      "name": "Start domain search",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "maxTries": 3,
+      "credentials": {
+        "snovioApi": {
+          "id": "uqvwWpTnbjCZIPv3",
+          "name": "Snov.io account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 10
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        9008,
+        4016
+      ],
+      "id": "9cc62fc0-3ec9-4443-bfdc-6941dc4b8c53",
+      "name": "Wait",
+      "webhookId": "ae8f5566-1dd8-4e61-be6f-11d2db1c7bd6"
+    },
+    {
+      "parameters": {
+        "operation": "getDomainSearchResult",
+        "task_hash": "={{ $('Start domain search').item.json.meta.task_hash }}"
+      },
+      "type": "n8n-nodes-snovio.snovioApi",
+      "typeVersion": 1,
+      "position": [
+        9232,
+        4016
+      ],
+      "id": "0e186938-2128-43ce-aa68-893d611b6b90",
+      "name": "Get domain search result",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "maxTries": 3,
+      "credentials": {
+        "snovioApi": {
+          "id": "uqvwWpTnbjCZIPv3",
+          "name": "Snov.io account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "startProspectProfiles",
+        "domain": "={{ $json.meta.domain }}",
+        "positions": "={{ (() => { const titles = $('Loop Monitors').item.json.contact_role_titles || $('Loop Monitors').item.json.contact_role_titles; return Array.isArray(titles) && titles.length > 0 ? titles.join(',') : \"\"; })() }}"
+      },
+      "type": "n8n-nodes-snovio.snovioApi",
+      "typeVersion": 1,
+      "position": [
+        9600,
+        4016
+      ],
+      "id": "047328d1-9660-4bf8-a258-b8eb6a25a7fa",
+      "name": "Start prospect profiles",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "maxTries": 3,
+      "credentials": {
+        "snovioApi": {
+          "id": "uqvwWpTnbjCZIPv3",
+          "name": "Snov.io account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 10
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        9776,
+        4032
+      ],
+      "id": "404f6b14-af42-4c92-aa2e-70d760dbcd0f",
+      "name": "Wait1",
+      "webhookId": "d2d11e33-f8ff-45ba-b591-b5a86df6393a"
+    },
+    {
+      "parameters": {
+        "operation": "getProspectProfilesResult",
+        "task_hash": "={{ $('Start prospect profiles').item.json.meta.task_hash }}"
+      },
+      "type": "n8n-nodes-snovio.snovioApi",
+      "typeVersion": 1,
+      "position": [
+        9984,
+        4016
+      ],
+      "id": "31493d00-5769-49e1-b631-c6383162e0f8",
+      "name": "Get prospect profiles result",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "maxTries": 3,
+      "credentials": {
+        "snovioApi": {
+          "id": "uqvwWpTnbjCZIPv3",
+          "name": "Snov.io account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "startProspectsEmails",
+        "prospect_hash": "={{ $json.search_emails_start.split('/').pop() }}"
+      },
+      "type": "n8n-nodes-snovio.snovioApi",
+      "typeVersion": 1,
+      "position": [
+        10832,
+        4000
+      ],
+      "id": "a5c50ce4-6ca1-4d81-b057-c8cb87077baf",
+      "name": "Start prospects emails",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "maxTries": 3,
+      "credentials": {
+        "snovioApi": {
+          "id": "uqvwWpTnbjCZIPv3",
+          "name": "Snov.io account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        10608,
+        4000
+      ],
+      "id": "f68a2f72-d701-4cec-917c-71403e7ab299",
+      "name": "Split Out1"
+    },
+    {
+      "parameters": {
+        "amount": 10
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        10992,
+        4000
+      ],
+      "id": "15231a2a-561f-480c-adac-d99f00de2e6f",
+      "name": "Wait2",
+      "webhookId": "2eaf0b40-c140-4dab-929f-46b0aec95da3"
+    },
+    {
+      "parameters": {
+        "operation": "getProspectEmailSearchResult",
+        "task_hash": "={{ $('Start prospects emails').item.json.meta.task_hash }}"
+      },
+      "type": "n8n-nodes-snovio.snovioApi",
+      "typeVersion": 1,
+      "position": [
+        11200,
+        4000
+      ],
+      "id": "75acff45-f3f6-42b9-a87a-7d57eed69614",
+      "name": "Get prospect email search result",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "maxTries": 3,
+      "credentials": {
+        "snovioApi": {
+          "id": "uqvwWpTnbjCZIPv3",
+          "name": "Snov.io account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ \n  !$json.data || Array.isArray($json.data) || !$json.data.emails || $json.data.emails.length === 0\n    ? 'no_email' \n    : ($json.data.emails[0].smtp_status || 'unknown') \n}}",
+                    "rightValue": "valid",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "441d5ce0-65b0-4c8a-a087-cd5cc575fee2"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "valid"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "86679269-6803-48d5-9aa8-7bdfb566d0cd",
+                    "leftValue": "={{    !$json.data || Array.isArray($json.data) || !$json.data.emails || $json.data.emails.length === 0     ? 'no_email'      : ($json.data.emails[0].smtp_status || 'unknown')  }}",
+                    "rightValue": "unknown",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "unknown"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "b9b8c842-c363-42aa-830c-c361288ca460",
+                    "leftValue": "={{    !$json.data || Array.isArray($json.data) || !$json.data.emails || $json.data.emails.length === 0     ? 'no_email'      : ($json.data.emails[0].smtp_status || 'unknown')  }}",
+                    "rightValue": "no_email",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "no_email"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        11424,
+        4000
+      ],
+      "id": "c03ff81b-c5a8-461e-bbd9-8fcab501df34",
+      "name": "Switch",
+      "alwaysOutputData": false,
+      "notesInFlow": false
+    },
+    {
+      "parameters": {
+        "resource": "emailVerifier",
+        "emails": "={{ $json.data.emails[0].email }}"
+      },
+      "type": "n8n-nodes-snovio.snovioApi",
+      "typeVersion": 1,
+      "position": [
+        11744,
+        4032
+      ],
+      "id": "3003c6bd-7895-40ee-9a3a-bc2fbf3ca9d9",
+      "name": "Start email verification",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "maxTries": 3,
+      "credentials": {
+        "snovioApi": {
+          "id": "uqvwWpTnbjCZIPv3",
+          "name": "Snov.io account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        11920,
+        4032
+      ],
+      "id": "afde6e6a-1b8b-4a4c-9cfe-0e5661d32320",
+      "name": "Wait3",
+      "webhookId": "c87c305c-32f3-4c79-b35c-1dc9f485a729"
+    },
+    {
+      "parameters": {
+        "resource": "emailVerifier",
+        "operation": "getEmailVerificationResult",
+        "task_hash": "={{ $('Start email verification').item.json.data.task_hash }}"
+      },
+      "type": "n8n-nodes-snovio.snovioApi",
+      "typeVersion": 1,
+      "position": [
+        12144,
+        4016
+      ],
+      "id": "8c525dc1-642e-44be-917f-d1b77d871831",
+      "name": "Get email verification result",
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "maxTries": 3,
+      "credentials": {
+        "snovioApi": {
+          "id": "uqvwWpTnbjCZIPv3",
+          "name": "Snov.io account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "06b722e4-d3e9-4647-bbd5-60a63b845087",
+              "leftValue": "={{ $json.data[0].result.smtp_status || $json.data[0].status }}",
+              "rightValue": "valid",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.3,
+      "position": [
+        12336,
+        4032
+      ],
+      "id": "8a74da12-2b41-49a4-8053-348265728560",
+      "name": "Keep Only Valid",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        12624,
+        3888
+      ],
+      "id": "caa7314d-7957-4068-9c99-146ebc806e21",
+      "name": "Merge",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://whatsapp-number-validator3.p.rapidapi.com/WhatsappNumberHasItBulkWithToken",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-rapidapi-host",
+              "value": "whatsapp-number-validator3.p.rapidapi.com"
+            },
+            {
+              "name": "x-rapidapi-key",
+              "value": "c71b48ff2emsh4dd8d672b714e67p18d914jsn2835bf27d34d"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"phone_numbers\": [\"{{ $json.clean_phone }}\"]}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 2000
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        14048,
+        3776
+      ],
+      "id": "d4aa703e-591f-4618-ae38-7aea61ac25e4",
+      "name": "WhatsApp Validator",
+      "retryOnFail": true,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Unique phone numbers for the WhatsApp check. Never returns nothing: with no\n// phone at all it emits a marker, so the run still reaches Group Leads (which\n// reads its contacts from Merge, not from here).\nconst seen = new Set();\nconst phones = [];\nfor (const item of $input.all()) {\n  const phone = item.json.clean_phone;\n  if (!phone || seen.has(phone)) continue;\n  seen.add(phone);\n  phones.push(item);\n}\nreturn phones.length ? phones : [{ json: { _no_phones: true } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        13584,
+        3872
+      ],
+      "id": "8adc7989-1281-424a-b806-e15fc27d36a4",
+      "name": "Remove duplicate"
+    },
+    {
+      "parameters": {
+        "jsCode": "const companyMap = {};\n\n// 0. Check if WhatsApp validation was requested from backend Webhook\nconst webhookData = $('Loop Monitors').item.json;\nconst body = webhookData.body || webhookData;\nconst isWhatsappValidationEnabled = body.validate_whatsapp === true;\n\n// Helper to extract last 10 digits for phone lookup\nfunction getPhoneKey(phone) {\n  if (!phone) return '';\n  const digits = String(phone).replace(/[^0-9]/g, '');\n  return digits.length >= 10 ? digits.slice(-10) : digits;\n}\n\n// 1. Build Company Profile Lookup Map from \"Get domain search result\"\nconst companyDetailsMap = {};\ntry {\n  const domainNodes = $('Get domain search result').all();\n  for (const domItem of domainNodes) {\n    const cData = domItem.json.data || domItem.json || {};\n    const site = cData.website || domItem.json.website || cData.domain || domItem.json.domain || '';\n    const domKey = site.replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0].toLowerCase();\n    \n    if (domKey) {\n      companyDetailsMap[domKey] = {\n        company_name: cData.company_name || cData.name || domItem.json.company_name || \"\",\n        company_size: cData.size || cData.company_size || domItem.json.size || domItem.json.company_size || \"N/A\",\n        industry: cData.industry || domItem.json.industry || \"N/A\",\n        hq_phone: cData.hq_phone || cData.company_phone || domItem.json.hq_phone || domItem.json.company_phone || \"\"\n      };\n    }\n  }\n} catch (e) {\n  // Fallback if node was skipped\n}\n\n// 2. Fetch raw profiles for job title fallback lookup\nconst positionLookupMap = {};\ntry {\n  const rawProfiles = $('Get prospect profiles result').all();\n  for (const profileItem of rawProfiles) {\n    const dataList = profileItem.json.data || [];\n    for (const person of dataList) {\n      const fn = (person.first_name || '').trim().toLowerCase();\n      const ln = (person.last_name || '').trim().toLowerCase();\n      const key = `${fn}_${ln}`;\n      if (person.position) {\n        positionLookupMap[key] = person.position;\n      }\n    }\n  }\n} catch (e) {}\n\n// 3. Fetch WhatsApp validation status map (if enabled)\nconst whatsappMap = {};\nif (isWhatsappValidationEnabled) {\n  try {\n    const whatsappResults = $('WhatsApp Validator').all();\n    for (const wa of whatsappResults) {\n      const rawPhone = wa.json.clean_phone || wa.json.phone_number || wa.json.phone || '';\n      const key = getPhoneKey(rawPhone);\n      if (key) {\n        const statusVal = wa.json.status || wa.json.whatsapp_status || \"\";\n        const isExists = wa.json.exists === true || statusVal.toLowerCase() === \"valid\" || statusVal.toLowerCase() === \"exists\" || statusVal.toLowerCase() === \"active\";\n        whatsappMap[key] = isExists ? \"Active\" : \"Not Active\";\n      }\n    }\n  } catch (e) {}\n}\n\n// 4. Process and group prospects from Merge node\nconst enrichedProspects = $('Merge').all();\n\nfor (const item of enrichedProspects) {\n  const data = item.json.data || item.json || {};\n  \n  // Extract email & domain\n  const email = data.emails?.[0]?.email || data.email || item.json.email || '';\n  const domain = email.includes('@') \n    ? email.split('@')[1].toLowerCase() \n    : (item.json.website || '').replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0].toLowerCase();\n  \n  if (!domain) continue;\n\n  // Retrieve original company metadata from domain search lookup map\n  const details = companyDetailsMap[domain] || {};\n\n  // Initialize company entry with true company metadata\n  if (!companyMap[domain]) {\n    companyMap[domain] = {\n      domain: domain,\n      company_name: details.company_name || item.json.company_name || data.company_name || \"\",\n      company_size: details.company_size || item.json.company_size || item.json.employees || data.company_size || \"N/A\",\n      industry: details.industry || item.json.industry || data.industry || \"N/A\",\n      hq_phone: details.hq_phone || item.json.company_phone || data.company_phone || \"\",\n      decision_makers: []\n    };\n  }\n\n  // Extract decision-maker name & position\n  const firstName = data.first_name || item.json.first_name || '';\n  const lastName = data.last_name || item.json.last_name || '';\n  const fullName = `${firstName} ${lastName}`.trim() || 'Decision Maker';\n  const personKey = `${firstName.trim().toLowerCase()}_${lastName.trim().toLowerCase()}`;\n\n  const extractedPosition = \n    data.position || item.json.position || data.job_title || item.json.job_title || positionLookupMap[personKey] || \"N/A\";\n\n  // Determine prospect phone number\n  let prospectPhone = item.json.clean_phone || item.json.phone_number || data.phone || null;\n  if (!prospectPhone && Array.isArray(data.phone_numbers) && data.phone_numbers.length > 0) {\n    prospectPhone = data.phone_numbers[0].phone || null;\n  }\n  if (!prospectPhone) {\n    prospectPhone = companyMap[domain].hq_phone || null;\n  }\n\n  const phoneKey = getPhoneKey(prospectPhone);\n\n  // Toggle WhatsApp Status\n  let whatsappStatus = null;\n  if (isWhatsappValidationEnabled) {\n    if (prospectPhone) {\n      whatsappStatus = (phoneKey && whatsappMap[phoneKey] !== undefined) ? whatsappMap[phoneKey] : \"Not Checked\";\n    } else {\n      whatsappStatus = null;\n    }\n  }\n\n  // Append decision maker\n  companyMap[domain].decision_makers.push({\n    full_name: fullName,\n    job_title: extractedPosition,\n    verified_email: email || null,\n    email_status: data.emails?.[0]?.smtp_status || item.json.smtp_status || \"valid\",\n    linkedin_url: item.json.linkedin_url || data.linkedin_url || item.json.source_page || data.source_page || null,\n    phone_number: prospectPhone || null,\n    whatsapp_status: whatsappStatus\n  });\n}\n\n// Abandon Rule: Silently discard companies with 0 valid decision makers\nconst qualifiedCompanies = Object.values(companyMap).filter(company => company.decision_makers.length > 0);\n\nif (!qualifiedCompanies.length) {\n  throw new Error('LeadPilot Error: no_valid_emails_found - no company was left with a verified decision maker.');\n}\nreturn qualifiedCompanies.map(company => ({ json: { ...company } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        14304,
+        3888
+      ],
+      "id": "b6c81c78-2798-4a54-8507-29720ba81e90",
+      "name": "Group Leads & Apply Abandon Rule"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Loop Monitors').item.json.results_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-LeadPilot-Run-Token",
+              "value": "={{ $('Loop Monitors').item.json.progress_token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"monitor_id\": \"{{ $('Loop Monitors').item.json.monitor_id }}\",\n  \"status\": \"completed\",\n  \"companies\": {{ JSON.stringify($input.all().map(i => i.json)) }}\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        14528,
+        3888
+      ],
+      "id": "843e655e-e906-48b3-a0a4-8983c66c3f3d",
+      "name": "Post Monitor Results",
+      "executeOnce": true,
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 5000,
+      "notes": "The backend dedupes these contacts against everything the user already has and bills only what is new."
+    },
+    {
+      "parameters": {
+        "jsCode": "// 1. Retrieve target min/max boundaries from Webhook payload\nconst webhookData = $('Loop Monitors').item.json;\nconst body = webhookData.body || webhookData;\n\nconst targetMin = body.company_size_min !== undefined && body.company_size_min !== null ? parseInt(body.company_size_min, 10) : null;\nconst targetMax = body.company_size_max !== undefined && body.company_size_max !== null ? parseInt(body.company_size_max, 10) : null;\n\n// Set your hard limit here to control costs\nconst MAX_COMPANIES = 30; \n\n// Helper function to parse size strings like \"11-50\", \"1-10\", \"501+\", \"11 - 50\"\nfunction parseSizeRange(sizeStr) {\n  if (!sizeStr || typeof sizeStr !== 'string') return null;\n\n  const numbers = sizeStr.match(/\\d+/g);\n  if (!numbers || numbers.length === 0) return null;\n\n  if (numbers.length === 1) {\n    const val = parseInt(numbers[0], 10);\n    return { min: val, max: val };\n  }\n\n  return {\n    min: parseInt(numbers[0], 10),\n    max: parseInt(numbers[1], 10)\n  };\n}\n\nconst keptItems = [];\n\nfor (const item of $input.all()) {\n  const companyData = item.json.data || item.json;\n  const companySizeStr = companyData.size || item.json.size;\n\n  // RULE 1: If user selected \"any size\" (targets are null), allow ALL companies immediately\n  if (targetMin === null && targetMax === null) {\n    keptItems.push(item);\n    continue;\n  }\n\n  // RULE 2: Unknown size is not evidence of a bad fit -- Snov.io simply has no\n  // data for this company. Keep it rather than lose a possible hidden gem;\n  // only a confidently-parsed size can disqualify a company below.\n  if (!companySizeStr || companySizeStr.trim() === \"\" || companySizeStr.toLowerCase() === \"n/a\") {\n    keptItems.push(item);\n    continue;\n  }\n\n  // Parse actual company size range\n  const actualRange = parseSizeRange(companySizeStr);\n\n  // If size string could not be parsed into numbers, we are not confident it's\n  // out of range either -- keep it rather than discard on an unreadable value.\n  if (!actualRange) {\n    keptItems.push(item);\n    continue;\n  }\n\n  // Check strict range overlap. Only discard when Snov.io gave us a real,\n  // parsed size range that confidently falls outside the target.\nconst aboveMin = targetMin === null || actualRange.max >= targetMin;\nconst belowMax = targetMax === null || actualRange.min <= targetMax;\nconst isWithinRange = aboveMin && belowMax;\n\n  if (isWithinRange) {\n    keptItems.push(item);\n  }\n}\n\nif (!keptItems.length) {\n  throw new Error(`LeadPilot Error: no_company_size_match - ${$input.all().length} companies were found but none matched the requested company size.`);\n}\nreturn keptItems.slice(0, MAX_COMPANIES);"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        9424,
+        4000
+      ],
+      "id": "483ad3ae-6e5d-4a93-aa6e-bed4908b8c21",
+      "name": "Filter the companies"
+    },
+    {
+      "parameters": {
+        "jsCode": "// --- CONFIGURABLE LIMITS ---\nconst MAX_PER_COMPANY = 5;       // Hard limit per domain\nconst MAX_TOTAL_PROSPECTS = 100; // Total output limit across all domains\n\n// Snov.io's own 'positions' filter (see \"Start prospect profiles\") already did\n// the real role filtering when the user picked a specific role -- it was given\n// the exact job titles from CONTACT_ROLES (app/services/search_targeting.py)\n// and only returns matching prospects. This array is the safety net for the\n// \"any role\" case (no native filter applied, so every title comes through) and\n// for stray junk titles (interns, generic \"Info\", etc.) slipping past that. It\n// intentionally casts a much wider net than the 3 curated CONTACT_ROLES lists,\n// including seniority/function words and non-English equivalents, so valid\n// titles like \"Head of Sourcing\" or \"Einkaufsleiter\" are not discarded just\n// because they don't spell out \"CEO\" or \"Buyer\".\nconst validRoles = [\n  // C-level / ownership\n  \"ceo\", \"cfo\", \"coo\", \"cmo\", \"cto\", \"chief\", \"owner\", \"founder\", \"co-founder\",\n  \"president\", \"chairman\", \"chairwoman\", \"principal\", \"proprietor\", \"partner\",\n  // Management / leadership (any department)\n  \"director\", \"managing director\", \"general manager\", \"gm\", \"vp\", \"vice president\",\n  \"head of\", \"head\", \"lead\", \"manager\", \"management\", \"executive\", \"supervisor\",\n  \"administrator\", \"in charge\",\n  // Procurement / sourcing / supply chain\n  \"procurement\", \"purchasing\", \"purchase\", \"buyer\", \"buying\", \"sourcing\",\n  \"supply chain\", \"category manager\", \"vendor manager\", \"import\", \"export\",\n  // Sales / business development / operations (frequent decision-makers for B2B)\n  \"sales\", \"business development\", \"commercial\", \"operations\", \"ops\",\n  // Common non-English equivalents (DE/FR/ES/PT/IT) so translated titles survive\n  \"einkauf\", \"geschaeftsfuehrer\", \"geschäftsführer\", \"direttore\", \"responsabile\",\n  \"achat\", \"directeur\", \"gerente\", \"director general\", \"diretor\"\n];\n\nlet totalKept = 0;\nconst finalItems = [];\n\nfor (const item of $input.all()) {\n  if (totalKept >= MAX_TOTAL_PROSPECTS) break;\n\n  let prospectsArray = Array.isArray(item.json.data) ? item.json.data : \n                       Array.isArray(item.json.prospects) ? item.json.prospects : [];\n\n  // Skip companies that have no prospect data\n  if (!prospectsArray || prospectsArray.length === 0) {\n    continue; \n  }\n\n  // RULE 1: Role filtering -- a wide net of decision-maker keywords. Snov.io\n  // already applied the precise, user-selected role filter upstream when one\n  // was requested, so this only needs to catch obviously irrelevant titles\n  // (interns, generic support roles, etc.), not reproduce that exact match.\n  let qualifiedProspects = prospectsArray.filter(p => {\n    const title = (p.position || p.title || p.job_title || \"\").toLowerCase();\n    if (!title) return false;\n    return validRoles.some(role => title.includes(role));\n  });\n\n  if (qualifiedProspects.length === 0) continue;\n\n  // RULE 2: Hard Limit Per Company\n  let slicedProspects = qualifiedProspects.slice(0, MAX_PER_COMPANY);\n\n  // RULE 3: Total Output Limit check\n  if (totalKept + slicedProspects.length > MAX_TOTAL_PROSPECTS) {\n    const roomLeft = MAX_TOTAL_PROSPECTS - totalKept;\n    slicedProspects = slicedProspects.slice(0, roomLeft);\n  }\n\n  totalKept += slicedProspects.length;\n\n  const newItem = { json: { ...item.json } };\n  newItem.json.data = slicedProspects; \n  finalItems.push(newItem);\n}\n\n// IF ZERO PROSPECTS FOUND ACROSS ALL COMPANIES, THROW ERROR TO TRIGGER ERROR WORKFLOW\nif (finalItems.length === 0 || totalKept === 0) {\n  throw new Error(\"LeadPilot Error: Zero decision-makers found matching target roles for any analyzed companies.\");\n}\n\nreturn finalItems;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        10336,
+        4016
+      ],
+      "id": "254fe169-3125-4999-babe-0bb7ccd26555",
+      "name": "Filter & Limit Prospects"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "b8f7db50-f186-4d2b-af9a-b6439ba4dfe7",
+              "leftValue": "={{ $('Loop Monitors').item.json.validate_whatsapp === true && $json._no_phones !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        13808,
+        3872
+      ],
+      "id": "b8aff46d-d176-4471-980c-53308eedbf56",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Robustly import parsePhoneNumberFromString across different package versions\nconst libPhone = require('libphonenumber-js');\nconst parseFn = libPhone.parsePhoneNumberFromString || libPhone.default?.parsePhoneNumberFromString;\n\n// 1. Build a dictionary of company countries and HQ phones from domain search results\nconst domainNodes = $('Get domain search result').all();\nconst hqPhoneMap = {};\n\nfor (const d of domainNodes) {\n  const data = d.json.data || d.json || {};\n  const site = (data.website || data.domain || d.json.domain || '')\n    .replace(/^https?:\\/\\//, '')\n    .replace(/^www\\./, '')\n    .split('/')[0]\n    .toLowerCase();\n    \n  if (site) {\n    hqPhoneMap[site] = {\n      phone: data.hq_phone || data.company_phone || '',\n      country: data.country_code || data.country || 'US' // Fallback to US\n    };\n  }\n}\n\n// 2. Parse raw numbers and add clean_phone to each item\nfor (const item of $input.all()) {\n  const data = item.json.data || item.json;\n  \n  const email = data.emails?.[0]?.email || data.email || '';\n  const domain = email.includes('@') ? email.split('@')[1].toLowerCase() : '';\n\n  const companyInfo = hqPhoneMap[domain] || { phone: '', country: 'US' };\n  let rawPhone = data.phone || data.phone_number || companyInfo.phone || '';\n\n  if (rawPhone && typeof parseFn === 'function') {\n    const parsed = parseFn(String(rawPhone), companyInfo.country);\n    \n    if (parsed && parsed.isValid()) {\n      item.json.clean_phone = parsed.number.replace('+', ''); // e.g., 18002223142\n    } else {\n      let digits = String(rawPhone).replace(/[^0-9]/g, '');\n      if (digits.length === 10) digits = '1' + digits;\n      item.json.clean_phone = digits;\n    }\n  } else if (rawPhone) {\n    // Fallback if parser fails to load\n    let digits = String(rawPhone).replace(/[^0-9]/g, '');\n    if (digits.length === 10) digits = '1' + digits;\n    item.json.clean_phone = digits;\n  } else {\n    item.json.clean_phone = null;\n  }\n}\n\nreturn $input.all();"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        13072,
+        3888
+      ],
+      "id": "9f9611ce-18e6-4609-ad16-0306f27451bc",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter has \"Always Output Data\" on, so when nothing qualifies it hands over\n// one empty item instead of stopping the run silently. Turn that into a named\n// failure the backend can show the user.\nconst real = $input.all().filter(i => i.json && i.json.domain);\nif (!real.length) {\n  const seen = $('Parse DeepSeek Response').all().length;\n  throw new Error(`LeadPilot Error: no_companies_found - none of the ${seen} search results qualified as a matching company website.`);\n}\nreturn real;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        8528,
+        4032
+      ],
+      "id": "7335f838-db47-42d6-8539-6d1acbd6c3ab",
+      "name": "Guard: AI Qualified",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// The verifier answers { data: [ { email, result } ] }, but everything after\n// Merge expects the prospect record { data: { first_name, emails: [...] } }.\n// Put the verified status back on the original prospect (paired item through\n// Switch), so a verified email is a lead instead of being dropped.\nif (!$json.data || !Array.isArray($json.data) || !$json.data[0]) {\n  return { json: {} }; // the empty item from \"Always Output Data\"\n}\nconst prospect = JSON.parse(JSON.stringify($('Switch').item.json));\nconst verified = $json.data[0];\nif (prospect.data && Array.isArray(prospect.data.emails) && prospect.data.emails[0]) {\n  prospect.data.emails[0].smtp_status = (verified.result && verified.result.smtp_status) || 'valid';\n}\nreturn { json: prospect };\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        12512,
+        3984
+      ],
+      "id": "e42a2f3f-9d87-4bef-ac79-09fc1735cdd0",
+      "name": "Restore Prospect",
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Only contacts with a verified email go on. If there is none, say so: the\n// backend shows the user \"no valid emails found\" and charges nothing.\nconst withEmail = $input.all().filter(i => {\n  const d = i.json && i.json.data;\n  const e = d && !Array.isArray(d) && Array.isArray(d.emails) ? d.emails[0] : null;\n  return e && e.email && e.smtp_status === 'valid';\n});\nif (!withEmail.length) {\n  throw new Error(`LeadPilot Error: no_valid_emails_found - none of the ${$input.all().length} decision makers had a verifiable email address.`);\n}\nreturn withEmail;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        12848,
+        3888
+      ],
+      "id": "d70fae1b-a4b6-42a8-a703-0270255e7bc6",
+      "name": "Guard: Valid Emails"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "serper": {
+      "main": [
+        [
+          {
+            "node": "Backlisting",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backlisting": {
+      "main": [
+        [
+          {
+            "node": "Remove Duplicates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remove Duplicates": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Parse DeepSeek Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse DeepSeek Response": {
+      "main": [
+        [
+          {
+            "node": "Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter": {
+      "main": [
+        [
+          {
+            "node": "Guard: AI Qualified",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start domain search": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "Get domain search result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get domain search result": {
+      "main": [
+        [
+          {
+            "node": "Filter the companies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start prospect profiles": {
+      "main": [
+        [
+          {
+            "node": "Wait1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait1": {
+      "main": [
+        [
+          {
+            "node": "Get prospect profiles result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get prospect profiles result": {
+      "main": [
+        [
+          {
+            "node": "Filter & Limit Prospects",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out1": {
+      "main": [
+        [
+          {
+            "node": "Start prospects emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start prospects emails": {
+      "main": [
+        [
+          {
+            "node": "Wait2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait2": {
+      "main": [
+        [
+          {
+            "node": "Get prospect email search result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get prospect email search result": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Start email verification",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start email verification": {
+      "main": [
+        [
+          {
+            "node": "Wait3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait3": {
+      "main": [
+        [
+          {
+            "node": "Get email verification result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get email verification result": {
+      "main": [
+        [
+          {
+            "node": "Keep Only Valid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keep Only Valid": {
+      "main": [
+        [
+          {
+            "node": "Restore Prospect",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Guard: Valid Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Remove duplicate": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp Validator": {
+      "main": [
+        [
+          {
+            "node": "Group Leads & Apply Abandon Rule",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Group Leads & Apply Abandon Rule": {
+      "main": [
+        [
+          {
+            "node": "Post Monitor Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter the companies": {
+      "main": [
+        [
+          {
+            "node": "Start prospect profiles",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter & Limit Prospects": {
+      "main": [
+        [
+          {
+            "node": "Split Out1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "WhatsApp Validator",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Group Leads & Apply Abandon Rule",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Remove duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guard: AI Qualified": {
+      "main": [
+        [
+          {
+            "node": "Start domain search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Prospect": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Guard: Valid Emails": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily 02:00 UTC": {
+      "main": [
+        [
+          {
+            "node": "Fetch Due Monitors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Due Monitors": {
+      "main": [
+        [
+          {
+            "node": "Split Monitors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Monitors": {
+      "main": [
+        [
+          {
+            "node": "Loop Monitors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Monitors": {
+      "main": [
+        [],
+        [
+          {
+            "node": "serper",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post Monitor Results": {
+      "main": [
+        [
+          {
+            "node": "Loop Monitors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "saveExecutionProgress": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false,
+    "errorWorkflow": "8jaVvfzmebEYKd5I"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "637fc58fdfcd37c603408ad0e89fcc31830fb4ad32d730273f7b375c9871f3cb"
+  },
+  "tags": []
+}
