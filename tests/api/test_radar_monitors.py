@@ -946,6 +946,143 @@ async def test_a_failed_run_costs_nothing_keeps_the_offset_and_marks_the_search(
     assert run.credits_charged == 0
 
 
+async def test_a_second_post_from_the_same_run_cannot_skip_a_page(
+    client: AsyncClient, db_session: Any
+) -> None:
+    """The exact shape n8n produced in production: the pipeline's error branch
+    fires the results node a second time with an empty list, ~100ms after the
+    real one. The page offset must advance exactly once, or tomorrow's run
+    skips results nobody ever read."""
+    headers = await _auth(client, db_session)
+    monitor = await _create_monitor(client, headers)
+    await _fund(db_session, await _user_id(db_session), 1000)
+
+    sent = await _dispatch_one(db_session, monitor["id"])
+
+    first = await client.post(
+        RESULTS,
+        headers={"X-LeadPilot-Run-Token": sent["progress_token"]},
+        json={
+            "monitor_id": monitor["id"],
+            "run_id": sent["run_id"],
+            "companies": [_company("https://a.example", ["one@a.example"])],
+        },
+    )
+    assert first.json()["serper_offset"] == 50
+
+    # The spurious empty repeat.
+    second = await client.post(
+        RESULTS,
+        headers={"X-LeadPilot-Run-Token": sent["progress_token"]},
+        json={"monitor_id": monitor["id"], "run_id": sent["run_id"], "companies": []},
+    )
+    body = second.json()
+
+    assert body["serper_offset"] == 50
+    assert body["credits_charged"] == 0
+    assert body["total_leads_generated"] == 1
+
+    stored = await db_session.get(RadarMonitor, monitor["id"])
+    await db_session.refresh(stored)
+    assert stored.serper_offset == 50
+
+    # The run keeps its real totals rather than being zeroed by the repeat.
+    run = await db_session.get(LeadSearchRun, sent["run_id"])
+    await db_session.refresh(run)
+    assert run.status == "completed"
+    assert run.contacts_added == 1
+    assert run.credits_charged == BASE_CONTACT_CREDIT
+
+
+async def test_an_empty_post_arriving_first_does_not_lose_the_real_results(
+    client: AsyncClient, db_session: Any
+) -> None:
+    """The same two posts in the other order: the empty one lands first and
+    closes the run, then the real companies arrive. They must still be saved,
+    billed once, and shown on the run -- and the offset still moves once."""
+    headers = await _auth(client, db_session)
+    monitor = await _create_monitor(client, headers)
+    await _fund(db_session, await _user_id(db_session), 1000)
+
+    sent = await _dispatch_one(db_session, monitor["id"])
+
+    await client.post(
+        RESULTS,
+        headers={"X-LeadPilot-Run-Token": sent["progress_token"]},
+        json={"monitor_id": monitor["id"], "run_id": sent["run_id"], "companies": []},
+    )
+
+    late = await client.post(
+        RESULTS,
+        headers={"X-LeadPilot-Run-Token": sent["progress_token"]},
+        json={
+            "monitor_id": monitor["id"],
+            "run_id": sent["run_id"],
+            "companies": [
+                _company("https://a.example", ["one@a.example", "two@a.example"])
+            ],
+        },
+    )
+    body = late.json()
+
+    assert body["contacts_added"] == 2
+    assert body["credits_charged"] == 2 * BASE_CONTACT_CREDIT
+    # One advance for the run, not one per post.
+    assert body["serper_offset"] == 50
+
+    run = await db_session.get(LeadSearchRun, sent["run_id"])
+    await db_session.refresh(run)
+    assert run.status == "completed"
+    assert run.contacts_added == 2
+    assert run.credits_charged == 2 * BASE_CONTACT_CREDIT
+
+    leads = await client.get(f"{PREFIX}/leads", headers=headers)
+    assert leads.json()["total"] == 1
+
+
+async def test_a_failure_report_after_results_changes_nothing(
+    client: AsyncClient, db_session: Any
+) -> None:
+    """A guard throwing on a late, empty wave must not repaint a run that
+    already delivered its results as failed."""
+    headers = await _auth(client, db_session)
+    monitor = await _create_monitor(client, headers)
+    await _fund(db_session, await _user_id(db_session), 1000)
+
+    sent = await _dispatch_one(db_session, monitor["id"])
+
+    await client.post(
+        RESULTS,
+        headers={"X-LeadPilot-Run-Token": sent["progress_token"]},
+        json={
+            "monitor_id": monitor["id"],
+            "run_id": sent["run_id"],
+            "companies": [_company("https://a.example", ["one@a.example"])],
+        },
+    )
+
+    await client.post(
+        RESULTS,
+        headers={"X-LeadPilot-Run-Token": sent["progress_token"]},
+        json={
+            "monitor_id": monitor["id"],
+            "run_id": sent["run_id"],
+            "status": "failed",
+            "error": "no_valid_emails_found",
+            "companies": [],
+        },
+    )
+
+    run = await db_session.get(LeadSearchRun, sent["run_id"])
+    await db_session.refresh(run)
+    assert run.status == "completed"
+    assert run.contacts_added == 1
+
+    stored = await db_session.get(RadarMonitor, monitor["id"])
+    await db_session.refresh(stored)
+    assert stored.serper_offset == 50
+
+
 async def test_an_empty_run_still_completes_and_advances_the_offset(
     client: AsyncClient, db_session: Any
 ) -> None:

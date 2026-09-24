@@ -140,6 +140,11 @@ class IngestTally:
     billable_contacts: int
     active_whatsapp: int
 
+    @classmethod
+    def empty(cls) -> "IngestTally":
+        """A report that produced nothing: a failure, or an ignored repeat."""
+        return cls(0, 0, 0, 0, 0, 0, 0)
+
 
 class RadarMonitorService(BaseService):
     def __init__(self, db: AsyncSession) -> None:
@@ -491,8 +496,29 @@ class RadarMonitorService(BaseService):
         every time. An email the user already has is discarded outright: not
         inserted, not counted, not charged.
         """
+        run = await self._run_for(monitor, payload.run_id)
+
+        # Whether this is the run's first report. n8n can post more than once
+        # for one execution -- a node that runs twice fires the results node
+        # twice -- and the offset must move exactly once per run, or the
+        # monitor skips a page of results it never read. Keyed on
+        # results_received_at rather than status, so a slow run the stale
+        # sweeper already failed still counts its late results as the first.
+        first_report = run is None or run.results_received_at is None
+
         if payload.status == "failed":
-            return await self._fail(monitor, payload.error)
+            if not first_report:
+                # The run already reported results; a later failure from the
+                # same execution changes nothing.
+                return self._response(monitor, IngestTally.empty(), 0, 0)
+
+            return await self._fail(monitor, payload.error, run)
+
+        if not first_report and not payload.companies:
+            # A repeat with nothing in it: the spurious second post. No-op.
+            log.info("radar_monitor.repeat_report_ignored", monitor_id=monitor.id)
+
+            return self._response(monitor, IngestTally.empty(), 0, 0)
 
         now = _utcnow()
 
@@ -527,8 +553,7 @@ class RadarMonitorService(BaseService):
 
         # The run this dispatch opened, so the companies it saves are listed
         # under it in Your Searches.
-        open_run = await self._latest_run(monitor)
-        run_id = open_run.id if open_run is not None else None
+        run_id = run.id if run is not None else None
 
         for incoming in payload.companies:
             fresh: list[DecisionMakerIn] = []
@@ -603,22 +628,30 @@ class RadarMonitorService(BaseService):
         charged, shortfall = await self._bill(monitor, tally)
 
         # Advancing the offset is what makes tomorrow's run find anything.
-        # Only a completed run advances it: a failed one would skip a page of
-        # results nobody ever looked at.
-        monitor.serper_offset += monitor.limit_per_run
+        # Only a completed run advances it -- a failed one would skip a page
+        # of results nobody ever looked at -- and only on the run's first
+        # report, so a repeat post from the same execution cannot skip one
+        # either.
+        if first_report:
+            monitor.serper_offset += monitor.limit_per_run
+            monitor.last_completed_at = now
+
+        # New contacts count whichever report brought them: the dedupe above
+        # has already made sure none of them is counted or billed twice.
         monitor.total_leads_generated += contacts_added
-        monitor.last_completed_at = now
 
         # Close the run this dispatch opened, so Your Searches shows what the
         # monitor did: what it found, what was new, and what it skipped as
         # already-owned.
-        await self._close_run(
-            monitor,
-            tally,
-            charged=charged,
-            shortfall=shortfall,
-            at=now,
-        )
+        if run is not None:
+            self._close_run(
+                run,
+                tally,
+                charged=charged,
+                shortfall=shortfall,
+                at=now,
+                first=first_report,
+            )
         monitor.last_error = None
 
         await self.commit()
@@ -627,6 +660,8 @@ class RadarMonitorService(BaseService):
             "radar_monitor.ingested",
             monitor_id=monitor.id,
             user_id=monitor.user_id,
+            run_id=run_id,
+            first_report=first_report,
             companies_received=tally.companies_received,
             contacts_added=contacts_added,
             duplicates_skipped=duplicates_skipped,
@@ -636,25 +671,45 @@ class RadarMonitorService(BaseService):
             serper_offset=monitor.serper_offset,
         )
 
+        return self._response(monitor, tally, charged, shortfall)
+
+    @staticmethod
+    def _response(
+        monitor: RadarMonitor, tally: IngestTally, charged: int, shortfall: int
+    ) -> MonitorResultsResponse:
         return MonitorResultsResponse(
             monitor_id=monitor.id,
             companies_received=tally.companies_received,
-            companies_saved=companies_saved,
-            companies_touched=companies_touched,
-            contacts_added=contacts_added,
-            duplicates_skipped=duplicates_skipped,
+            companies_saved=tally.companies_saved,
+            companies_touched=tally.companies_touched,
+            contacts_added=tally.contacts_added,
+            duplicates_skipped=tally.duplicates_skipped,
             credits_charged=charged,
             credits_shortfall=shortfall,
             total_leads_generated=monitor.total_leads_generated,
             serper_offset=monitor.serper_offset,
         )
 
-    async def _latest_run(self, monitor: RadarMonitor) -> LeadSearchRun | None:
-        """The run this monitor's most recent dispatch opened.
+    async def _run_for(
+        self, monitor: RadarMonitor, run_id: str | None
+    ) -> LeadSearchRun | None:
+        """The run a results post belongs to.
 
-        Matched by monitor rather than carried on the payload, so a workflow
-        that loses the run id still closes the right row.
+        By the id the dispatcher sent, whatever its status: a slow run the
+        stale sweeper failed must still be found when its results arrive. A
+        payload without an id falls back to the monitor's open run.
         """
+        if run_id:
+            result = await self.db.execute(
+                select(LeadSearchRun).where(
+                    LeadSearchRun.id == run_id,
+                    LeadSearchRun.monitor_id == monitor.id,
+                )
+            )
+            found = result.scalar_one_or_none()
+            if found is not None:
+                return found
+
         result = await self.db.execute(
             select(LeadSearchRun)
             .where(
@@ -667,44 +722,48 @@ class RadarMonitorService(BaseService):
 
         return result.scalar_one_or_none()
 
-    async def _close_run(
-        self,
-        monitor: RadarMonitor,
+    @staticmethod
+    def _close_run(
+        run: LeadSearchRun,
         tally: IngestTally,
         *,
         charged: int,
         shortfall: int,
         at: datetime,
+        first: bool,
     ) -> None:
-        """Mark this monitor's run complete, with what it actually produced."""
-        run = await self._latest_run(monitor)
-        if run is None:
-            return
+        """Mark the run complete with what it produced.
 
+        A first report sets the totals; a repeat adds to them, since whatever
+        it brought was genuinely new (the dedupe saw to that).
+        """
         run.status = RunStatus.COMPLETED.value
         run.stage = SearchStage.COMPLETED.value
-        # Every company this run put leads into, not just the ones it created.
-        # The results list below shows all of them, so counting only new rows
-        # here would contradict what the user is looking at.
-        run.companies_found = tally.companies_touched
-        run.contacts_found = tally.contacts_added + tally.duplicates_skipped
-        run.contacts_added = tally.contacts_added
-        run.contacts_duplicate = tally.duplicates_skipped
-        run.credits_charged = charged
-        run.credits_shortfall = shortfall
-        run.credits_charged_at = at
-        run.finished_at = at
-        run.results_received_at = at
+        # A sweeper that closed it as stale was wrong: results did arrive.
+        run.error = None
 
-    async def _fail_run(self, monitor: RadarMonitor, error: str, at: datetime) -> None:
-        """Mark this monitor's run failed. Nothing is billed for it."""
-        run = await self._latest_run(monitor)
-        if run is None:
-            return
+        found = tally.contacts_added + tally.duplicates_skipped
 
-        run.status = RunStatus.FAILED.value
-        run.error = error
-        run.finished_at = at
+        if first:
+            # Every company this run put leads into, not just the ones it
+            # created: the results list shows all of them, so counting only
+            # new rows would contradict what the user is looking at.
+            run.companies_found = tally.companies_touched
+            run.contacts_found = found
+            run.contacts_added = tally.contacts_added
+            run.contacts_duplicate = tally.duplicates_skipped
+            run.credits_charged = charged
+            run.credits_shortfall = shortfall
+            run.credits_charged_at = at
+            run.finished_at = at
+            run.results_received_at = at
+        else:
+            run.companies_found += tally.companies_touched
+            run.contacts_found += found
+            run.contacts_added += tally.contacts_added
+            run.contacts_duplicate += tally.duplicates_skipped
+            run.credits_charged += charged
+            run.credits_shortfall += shortfall
 
     async def _upsert_company(
         self,
@@ -789,12 +848,15 @@ class RadarMonitorService(BaseService):
         )
 
     async def _fail(
-        self, monitor: RadarMonitor, error: str | None
+        self, monitor: RadarMonitor, error: str | None, run: LeadSearchRun | None
     ) -> MonitorResultsResponse:
         """Record a failed run without billing or advancing the offset."""
         monitor.last_error = (error or "Monitor run failed.")[:500]
 
-        await self._fail_run(monitor, monitor.last_error, _utcnow())
+        if run is not None:
+            run.status = RunStatus.FAILED.value
+            run.error = monitor.last_error
+            run.finished_at = _utcnow()
 
         await self.commit()
 
@@ -802,14 +864,4 @@ class RadarMonitorService(BaseService):
             "radar_monitor.run_failed", monitor_id=monitor.id, error=monitor.last_error
         )
 
-        return MonitorResultsResponse(
-            monitor_id=monitor.id,
-            companies_received=0,
-            companies_saved=0,
-            contacts_added=0,
-            duplicates_skipped=0,
-            credits_charged=0,
-            credits_shortfall=0,
-            total_leads_generated=monitor.total_leads_generated,
-            serper_offset=monitor.serper_offset,
-        )
+        return self._response(monitor, IngestTally.empty(), 0, 0)

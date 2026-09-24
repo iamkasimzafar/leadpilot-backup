@@ -171,6 +171,20 @@ def build() -> dict:
     if "Send Results to Backend" in connections:
         connections[RESULTS_NODE] = connections.pop("Send Results to Backend")
 
+    # Note on Switch's `no_email` output, which is left wired on purpose.
+    #
+    # It feeds the same Merge input as the `valid` output, and n8n does not
+    # combine two deliveries to one input: when both carry items, Merge runs
+    # twice, Guard: Valid Emails throws on the no-email wave, and its error
+    # output fires the results node a second time with an empty list. The
+    # backend treats that repeat as a no-op (ingest is idempotent per run:
+    # the offset moves once, whichever post lands first).
+    #
+    # Cutting the link instead would break the one case it exists for: when
+    # every prospect has no email, the `valid` and `unknown` branches are
+    # both empty, nothing else reaches Merge, and the run would never report
+    # back at all.
+
     # Every empty-stage node's error output goes straight to the results
     # node. Output 0 is the node's normal path; `continueErrorOutput` adds
     # output 1.

@@ -312,6 +312,9 @@ class MonitorResultsResponse(BaseModel):
     companies_received: int
     companies_saved: int
 
+    # Companies this report wrote leads into, new or already held.
+    companies_touched: int = 0
+
     # Contacts that were genuinely new for this user.
     contacts_added: int
 
