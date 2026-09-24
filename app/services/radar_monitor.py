@@ -321,13 +321,17 @@ class RadarMonitorService(BaseService):
                 await self._post(payload, client)
             except UpstreamError as exc:
                 # Give it another go soon rather than losing the whole day to
-                # a blip. The run opened for it is closed as failed so Your
-                # Searches does not show it running forever.
+                # a blip. The run opened for it is discarded, not failed: n8n
+                # never started anything, and a stream of "failed" searches
+                # the user did not start -- one per retry while n8n is down --
+                # would only be noise. The reason stays on the monitor.
                 monitor.last_error = str(exc)[:500]
                 monitor.next_run_at = now + timedelta(
                     minutes=settings.MONITOR_RETRY_MINUTES
                 )
-                await self._fail_run(monitor, monitor.last_error, now)
+                unsent = await self.db.get(LeadSearchRun, payload.run_id)
+                if unsent is not None:
+                    await self.db.delete(unsent)
                 await self.commit()
 
                 log.warning(

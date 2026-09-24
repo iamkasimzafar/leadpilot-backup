@@ -530,10 +530,12 @@ async def test_dispatch_opens_a_search_the_user_can_see(
     assert run["status"] == "running"
 
 
-async def test_an_unreachable_workflow_retries_soon_and_fails_the_search(
+async def test_an_unreachable_workflow_retries_soon_and_leaves_no_search(
     client: AsyncClient, db_session: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A blip must not cost the whole day, and must not leave a run spinning."""
+    """A blip must not cost the whole day, and must not leave a search behind:
+    n8n never started anything, so there is nothing for Your Searches to show
+    -- least of all a new "failed" row every thirty minutes while it is down."""
     monkeypatch.setattr(settings, "MONITOR_RETRY_MINUTES", 30)
 
     headers = await _auth(client, db_session)
@@ -554,7 +556,15 @@ async def test_an_unreachable_workflow_retries_soon_and_fails_the_search(
     assert now < slot <= now + timedelta(minutes=30, seconds=1)
 
     runs = await client.get(f"{PREFIX}/lead-radar/runs", headers=headers)
-    assert runs.json()["items"][0]["status"] == "failed"
+    assert runs.json()["total"] == 0
+
+    # And a retry that succeeds opens exactly one search.
+    await _make_due(db_session, monitor["id"])
+    assert len(await _dispatch(db_session)) == 1
+
+    runs = await client.get(f"{PREFIX}/lead-radar/runs", headers=headers)
+    assert runs.json()["total"] == 1
+    assert runs.json()["items"][0]["status"] == "running"
 
 
 # --- Results, dedupe and billing --------------------------------------------
