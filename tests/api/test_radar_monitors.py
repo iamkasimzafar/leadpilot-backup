@@ -1112,3 +1112,314 @@ async def test_an_empty_run_still_completes_and_advances_the_offset(
     run = await db_session.get(LeadSearchRun, sent["run_id"])
     await db_session.refresh(run)
     assert run.status == "completed"
+
+
+# --- Pause / resume ---------------------------------------------------------
+
+
+async def _slot(db_session: Any, monitor_id: str) -> datetime:
+    stored = await db_session.get(RadarMonitor, monitor_id)
+    await db_session.refresh(stored)
+    slot = stored.next_run_at
+    return slot if slot.tzinfo else slot.replace(tzinfo=UTC)
+
+
+async def _set_slot(db_session: Any, monitor_id: str, when: datetime) -> None:
+    stored = await db_session.get(RadarMonitor, monitor_id)
+    stored.next_run_at = when
+    await db_session.commit()
+
+
+async def _set_status(
+    client: AsyncClient, headers: dict[str, str], monitor_id: str, status: str
+) -> dict[str, Any]:
+    response = await client.patch(
+        f"{MONITORS}/{monitor_id}", headers=headers, json={"status": status}
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def test_resume_keeps_a_slot_that_is_still_ahead(
+    client: AsyncClient, db_session: Any
+) -> None:
+    """Pause-then-resume must not buy an extra run: a monitor that already ran
+    today and is slotted for tomorrow stays slotted for tomorrow."""
+    headers = await _auth(client, db_session)
+    monitor = await _create_monitor(client, headers)
+
+    tomorrow = datetime.now(UTC) + timedelta(hours=20)
+    await _set_slot(db_session, monitor["id"], tomorrow)
+
+    for _ in range(3):  # toggling repeatedly changes nothing
+        assert (await _set_status(client, headers, monitor["id"], "paused"))[
+            "status"
+        ] == "paused"
+        assert (await _set_status(client, headers, monitor["id"], "running"))[
+            "status"
+        ] == "running"
+
+    assert abs((await _slot(db_session, monitor["id"])) - tomorrow) < timedelta(seconds=1)
+    assert await _dispatch(db_session) == []
+
+
+async def test_resume_brings_forward_a_slot_missed_while_paused(
+    client: AsyncClient, db_session: Any
+) -> None:
+    headers = await _auth(client, db_session)
+    monitor = await _create_monitor(client, headers)
+
+    await _set_status(client, headers, monitor["id"], "paused")
+    # Its slot came and went while it was paused...
+    await _set_slot(db_session, monitor["id"], datetime.now(UTC) - timedelta(hours=3))
+    # ...and the dispatcher left it alone.
+    assert await _dispatch(db_session) == []
+
+    before = datetime.now(UTC)
+    await _set_status(client, headers, monitor["id"], "running")
+
+    slot = await _slot(db_session, monitor["id"])
+    assert (
+        before
+        < slot
+        <= before + timedelta(minutes=settings.MONITOR_FIRST_RUN_DELAY_MINUTES, seconds=5)
+    )
+
+
+async def test_results_of_a_run_in_flight_when_paused_still_land(
+    client: AsyncClient, db_session: Any
+) -> None:
+    """Pausing stops future runs; it cannot un-ask n8n for one already going.
+    Those leads were found and paid for upstream, so they are saved and billed
+    as normal -- and the paused monitor is not dispatched again."""
+    headers = await _auth(client, db_session)
+    monitor = await _create_monitor(client, headers)
+    await _fund(db_session, await _user_id(db_session), 1000)
+
+    sent = await _dispatch_one(db_session, monitor["id"])
+    await _set_status(client, headers, monitor["id"], "paused")
+
+    response = await client.post(
+        RESULTS,
+        headers={"X-LeadPilot-Run-Token": sent["progress_token"]},
+        json={
+            "monitor_id": monitor["id"],
+            "run_id": sent["run_id"],
+            "companies": [_company("https://a.example", ["one@a.example"])],
+        },
+    )
+    assert response.json()["contacts_added"] == 1
+
+    await _make_due(db_session, monitor["id"])
+    assert await _dispatch(db_session) == []
+
+
+# --- Notifications and the credit ledger -------------------------------------
+
+
+async def _notifications(db_session: Any) -> list[Any]:
+    from app.models.notification import Notification
+
+    rows = await db_session.execute(
+        select(Notification).order_by(Notification.created_at)
+    )
+    return list(rows.scalars().all())
+
+
+async def _ledger(db_session: Any) -> list[Any]:
+    from app.models.billing import CreditTransaction
+
+    rows = await db_session.execute(
+        select(CreditTransaction).where(
+            CreditTransaction.reference_type == "radar_monitor"
+        )
+    )
+    return list(rows.scalars().all())
+
+
+async def test_new_leads_raise_a_monitor_notification_and_one_ledger_entry(
+    client: AsyncClient, db_session: Any
+) -> None:
+    headers = await _auth(client, db_session)
+    monitor = await _create_monitor(client, headers)
+    user_id = await _user_id(db_session)
+    await _fund(db_session, user_id, 1000)
+    before = await _notifications(db_session)
+
+    sent = await _dispatch_one(db_session, monitor["id"])
+    await client.post(
+        RESULTS,
+        headers={"X-LeadPilot-Run-Token": sent["progress_token"]},
+        json={
+            "monitor_id": monitor["id"],
+            "run_id": sent["run_id"],
+            "companies": [
+                _company("https://a.example", ["one@a.example", "two@a.example"])
+            ],
+        },
+    )
+
+    new = (await _notifications(db_session))[len(before) :]
+    assert len(new) == 1
+    assert new[0].kind == "monitor"
+    assert "found 2 new leads" in new[0].title
+    assert f"{2 * BASE_CONTACT_CREDIT} credits charged" in new[0].subtitle
+    # Opens the run's own page in Your Searches.
+    assert new[0].link == f"/searches/{sent['run_id']}"
+
+    ledger = await _ledger(db_session)
+    assert len(ledger) == 1
+    assert ledger[0].amount == -2 * BASE_CONTACT_CREDIT
+    assert ledger[0].kind == "usage"
+    assert ledger[0].balance_after == 1000 - 2 * BASE_CONTACT_CREDIT
+    assert "2 verified contacts" in ledger[0].description
+
+    wallet = await db_session.get(Wallet, user_id)
+    await db_session.refresh(wallet)
+    assert wallet.balance == 1000 - 2 * BASE_CONTACT_CREDIT
+
+
+async def test_a_run_with_nothing_new_stays_quiet_and_costs_nothing(
+    client: AsyncClient, db_session: Any
+) -> None:
+    """A monitor runs daily; "no new leads" every day would train the user to
+    ignore the bell."""
+    headers = await _auth(client, db_session)
+    monitor = await _create_monitor(client, headers)
+    await _fund(db_session, await _user_id(db_session), 1000)
+
+    companies = [_company("https://a.example", ["one@a.example"])]
+    sent = await _dispatch_one(db_session, monitor["id"])
+    await client.post(
+        RESULTS,
+        headers={"X-LeadPilot-Run-Token": sent["progress_token"]},
+        json={
+            "monitor_id": monitor["id"],
+            "run_id": sent["run_id"],
+            "companies": companies,
+        },
+    )
+    after_first = len(await _notifications(db_session))
+
+    # The same contact again: all duplicate.
+    sent = await _dispatch_one(db_session, monitor["id"])
+    await client.post(
+        RESULTS,
+        headers={"X-LeadPilot-Run-Token": sent["progress_token"]},
+        json={
+            "monitor_id": monitor["id"],
+            "run_id": sent["run_id"],
+            "companies": companies,
+        },
+    )
+
+    assert len(await _notifications(db_session)) == after_first
+    assert len(await _ledger(db_session)) == 1
+
+
+async def test_a_shortfall_is_always_announced(
+    client: AsyncClient, db_session: Any
+) -> None:
+    """Money owed is forced past the user's settings, as for a manual search."""
+    headers = await _auth(client, db_session)
+    monitor = await _create_monitor(client, headers)
+    user_id = await _user_id(db_session)
+    # Enough for one contact, not two.
+    await _fund(db_session, user_id, BASE_CONTACT_CREDIT)
+
+    # The user has monitor and credit notifications switched off.
+    prefs = await client.patch(
+        f"{PREFIX}/notification-preferences",
+        headers=headers,
+        json={"monitor": False, "credits": False},
+    )
+    assert prefs.status_code == 200, prefs.text
+    before = await _notifications(db_session)
+
+    sent = await _dispatch_one(db_session, monitor["id"])
+    response = await client.post(
+        RESULTS,
+        headers={"X-LeadPilot-Run-Token": sent["progress_token"]},
+        json={
+            "monitor_id": monitor["id"],
+            "run_id": sent["run_id"],
+            "companies": [
+                _company("https://a.example", ["one@a.example", "two@a.example"])
+            ],
+        },
+    )
+    body = response.json()
+    assert body["credits_charged"] == BASE_CONTACT_CREDIT
+    assert body["credits_shortfall"] == BASE_CONTACT_CREDIT
+
+    new = (await _notifications(db_session))[len(before) :]
+    # The "found N leads" notice respects the switched-off setting; the
+    # shortfall does not.
+    assert [notice.kind for notice in new] == ["credits"]
+    assert "could not be charged" in new[0].title
+
+    wallet = await db_session.get(Wallet, user_id)
+    await db_session.refresh(wallet)
+    assert wallet.balance == 0
+
+
+async def test_a_failed_run_notifies_and_charges_nothing(
+    client: AsyncClient, db_session: Any
+) -> None:
+    headers = await _auth(client, db_session)
+    monitor = await _create_monitor(client, headers)
+    before = await _notifications(db_session)
+
+    sent = await _dispatch_one(db_session, monitor["id"])
+    await client.post(
+        RESULTS,
+        headers={"X-LeadPilot-Run-Token": sent["progress_token"]},
+        json={
+            "monitor_id": monitor["id"],
+            "run_id": sent["run_id"],
+            "status": "failed",
+            "error": "Serper quota exhausted",
+        },
+    )
+
+    new = (await _notifications(db_session))[len(before) :]
+    assert len(new) == 1
+    assert new[0].kind == "monitor"
+    assert "failed" in new[0].title
+    assert await _ledger(db_session) == []
+
+
+async def test_results_push_to_the_open_tabs(
+    client: AsyncClient, db_session: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bell and the run's page update live, and only after the commit."""
+    from app.services import radar_monitor as module
+
+    published: list[tuple[str, str]] = []
+
+    def notify(user_id: str, notification_id: str) -> None:
+        published.append(("notification", notification_id))
+
+    def run_update(user_id: str, run_id: str) -> None:
+        published.append(("run", run_id))
+
+    monkeypatch.setattr(module.NotificationService, "publish", staticmethod(notify))
+    monkeypatch.setattr(module.progress_stream, "publish", run_update)
+
+    headers = await _auth(client, db_session)
+    monitor = await _create_monitor(client, headers)
+    await _fund(db_session, await _user_id(db_session), 1000)
+
+    sent = await _dispatch_one(db_session, monitor["id"])
+    await client.post(
+        RESULTS,
+        headers={"X-LeadPilot-Run-Token": sent["progress_token"]},
+        json={
+            "monitor_id": monitor["id"],
+            "run_id": sent["run_id"],
+            "companies": [_company("https://a.example", ["one@a.example"])],
+        },
+    )
+
+    assert [kind for kind, _ in published].count("notification") == 1
+    assert ("run", sent["run_id"]) in published

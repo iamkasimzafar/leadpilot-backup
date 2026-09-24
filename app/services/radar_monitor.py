@@ -40,6 +40,7 @@ from app.models.lead_search import (
     SearchStage,
     SearchType,
 )
+from app.models.notification import Notification, NotificationKind
 from app.models.radar_monitor import (
     MonitorFrequency,
     MonitorSearchType,
@@ -67,6 +68,8 @@ from app.services.billing_catalog import (
     WHATSAPP_VALIDATION_CREDITS,
 )
 from app.services.leads import LeadService
+from app.services.notification import NotificationService
+from app.services.progress_stream import progress_stream
 from app.services.search_targeting import role_titles_for, size_bounds_for
 
 log = get_logger(__name__)
@@ -80,6 +83,12 @@ _WHATSAPP_ACTIVE = "active"
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _run_link(run: LeadSearchRun | None) -> str:
+    """Where a monitor notification takes the user: the run's own page in
+    Your Searches, which shows the new leads and what was skipped."""
+    return f"/searches/{run.id}" if run is not None else "/my-leads"
 
 
 # Seconds in a day: the width of the window a daily monitor's slot is drawn
@@ -154,6 +163,7 @@ class RadarMonitorService(BaseService):
         self.contacts = ContactEmailRepository(db)
         self.billing = BillingService(db)
         self.leads = LeadService(db)
+        self.notifications = NotificationService(db)
 
     # --- CRUD ---------------------------------------------------------------
 
@@ -254,11 +264,23 @@ class RadarMonitorService(BaseService):
         if payload.status is not None and payload.status != monitor.status:
             monitor.status = payload.status
 
-            # Resuming runs promptly rather than waiting out whatever slot was
-            # left over from before the pause. Pausing leaves the slot alone:
-            # status already keeps it out of the dispatcher's query.
+            # Pausing leaves the slot alone: status already keeps the monitor
+            # out of the dispatcher's query.
+            #
+            # Resuming keeps that slot when it is still ahead: the monitor has
+            # not missed anything, and re-slotting it "within minutes" would
+            # let pause-then-resume buy an extra run -- toggling a few times
+            # would run the same search a few times in one day. Only a slot
+            # that went by while paused is brought forward, so the user gets
+            # the run they missed rather than waiting for the next one.
             if payload.status == MonitorStatus.RUNNING.value:
-                monitor.next_run_at = first_run_slot(_utcnow())
+                now = _utcnow()
+                slot = monitor.next_run_at
+                if slot is not None and slot.tzinfo is None:
+                    slot = slot.replace(tzinfo=UTC)
+
+                if slot is None or slot <= now:
+                    monitor.next_run_at = first_run_slot(now)
 
         await self.commit()
 
@@ -654,7 +676,20 @@ class RadarMonitorService(BaseService):
             )
         monitor.last_error = None
 
+        # Written inside this transaction, announced only once it commits, so
+        # the user is never told about leads that did not land.
+        notices = await self._result_notices(
+            monitor,
+            run,
+            added=contacts_added,
+            duplicates=duplicates_skipped,
+            charged=charged,
+            shortfall=shortfall,
+        )
+
         await self.commit()
+
+        self._announce(monitor.user_id, run, notices)
 
         log.info(
             "radar_monitor.ingested",
@@ -858,10 +893,97 @@ class RadarMonitorService(BaseService):
             run.error = monitor.last_error
             run.finished_at = _utcnow()
 
+        notice = await self.notifications.create(
+            monitor.user_id,
+            kind=NotificationKind.MONITOR,
+            title=f'Radar Monitor "{monitor.name}" run failed',
+            subtitle=(
+                f"{monitor.last_error} Nothing was charged; it will try again at "
+                "its next scheduled run."
+            ),
+            link=_run_link(run),
+            commit=False,
+        )
+
         await self.commit()
+
+        self._announce(monitor.user_id, run, [notice])
 
         log.warning(
             "radar_monitor.run_failed", monitor_id=monitor.id, error=monitor.last_error
         )
 
         return self._response(monitor, IngestTally.empty(), 0, 0)
+
+    async def _result_notices(
+        self,
+        monitor: RadarMonitor,
+        run: LeadSearchRun | None,
+        *,
+        added: int,
+        duplicates: int,
+        charged: int,
+        shortfall: int,
+    ) -> list[Notification | None]:
+        """What to tell the user about a run's results. Not committed here.
+
+        A run that found nothing new says nothing: a monitor runs every day,
+        and a daily "no new leads" would teach the user to ignore the bell.
+        A shortfall is always announced -- it is money owed, not news -- so it
+        is forced past the user's notification settings, as it is for a
+        manual search.
+        """
+        notices: list[Notification | None] = []
+
+        if added > 0:
+            skipped = (
+                f"{duplicates:,} already in My Leads were skipped. " if duplicates else ""
+            )
+            notices.append(
+                await self.notifications.create(
+                    monitor.user_id,
+                    kind=NotificationKind.MONITOR,
+                    title=(
+                        f'Radar Monitor "{monitor.name}" found {added:,} new '
+                        f"lead{'s' if added != 1 else ''}"
+                    ),
+                    subtitle=(
+                        f"Added to My Leads. {skipped}{charged:,} credits charged."
+                    ),
+                    link=_run_link(run),
+                    commit=False,
+                )
+            )
+
+        if shortfall > 0:
+            notices.append(
+                await self.notifications.create(
+                    monitor.user_id,
+                    kind=NotificationKind.CREDITS,
+                    title=f"{shortfall:,} credits could not be charged",
+                    subtitle=(
+                        f'Radar Monitor "{monitor.name}" cost {charged + shortfall:,} '
+                        f"credits but your balance only covered {charged:,}. "
+                        "Top up to keep your monitors running."
+                    ),
+                    link="/wallet",
+                    commit=False,
+                    force=True,
+                )
+            )
+
+        return notices
+
+    @staticmethod
+    def _announce(
+        user_id: str, run: LeadSearchRun | None, notices: list[Notification | None]
+    ) -> None:
+        """Push what just committed to the user's open tabs: the bell, and the
+        run's page in Your Searches if they have it open."""
+        for notice in notices:
+            # None when the user has this notification kind switched off.
+            if notice is not None:
+                NotificationService.publish(user_id, notice.id)
+
+        if run is not None:
+            progress_stream.publish(user_id, run.id)
