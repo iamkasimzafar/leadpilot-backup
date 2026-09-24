@@ -6,6 +6,7 @@ from sqlalchemy import Select, func, or_, select
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.models.lead import Company, CompanySearchRun, DecisionMaker, LeadStatus
+from app.models.lead_search import LeadSearchRun
 from app.repositories.base import BaseRepository
 from app.schemas.lead import WHATSAPP_ACTIVE
 
@@ -239,6 +240,50 @@ class CompanyRepository(BaseRepository[Company]):
         result = await self.db.execute(stmt)
 
         return list(result.scalars().all())
+
+    async def first_runs_for(self, companies: list[Company]) -> dict[str, LeadSearchRun]:
+        """The search that first found each company: where the lead came from.
+
+        Read from company_search_run, oldest link first. A company later
+        re-found by another search keeps its original source -- the link
+        table records every run, and the earliest one is the origin.
+        `Company.run_id` is only the fallback for a row with no links at all,
+        because that pointer moves to whichever run touched the company last.
+
+        One query for the whole page, not one per lead.
+        """
+        if not companies:
+            return {}
+
+        ids = [company.id for company in companies]
+        stmt = (
+            select(CompanySearchRun.company_id, LeadSearchRun)
+            .join(LeadSearchRun, LeadSearchRun.id == CompanySearchRun.run_id)
+            .where(CompanySearchRun.company_id.in_(ids))
+            .order_by(CompanySearchRun.created_at.asc(), CompanySearchRun.id.asc())
+        )
+        result = await self.db.execute(stmt)
+
+        sources: dict[str, LeadSearchRun] = {}
+        for company_id, run in result.all():
+            sources.setdefault(company_id, run)
+
+        # Rows no link covers: fall back to the run pointer, if there is one.
+        # Several companies can share a run, so group them under it.
+        missing: dict[str, list[str]] = {}
+        for company in companies:
+            if company.id not in sources and company.run_id:
+                missing.setdefault(company.run_id, []).append(company.id)
+
+        if missing:
+            runs = await self.db.execute(
+                select(LeadSearchRun).where(LeadSearchRun.id.in_(list(missing)))
+            )
+            for run in runs.scalars().all():
+                for company_id in missing[run.id]:
+                    sources[company_id] = run
+
+        return sources
 
     async def link_to_run(self, run_id: str, company_id: str) -> None:
         """Record that this run produced this company.

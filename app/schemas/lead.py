@@ -365,6 +365,33 @@ class DecisionMakerRead(BaseSchema):
     whatsapp_status: str | None = None
 
 
+class LeadSource(BaseModel):
+    """Which Lead Radar feature produced a lead: the search that FIRST found it.
+
+    `search_type` is the run's (b2b, local, lookalike_contacts, hs_code,
+    monitor) and is what the UI turns into "Smart Keyword Search", "Radar
+    Monitor" and so on. `label` is that search's own wording -- the keyword,
+    the HS code or the monitor's name -- so the user can tell two searches of
+    the same kind apart.
+    """
+
+    search_type: str
+    run_id: str
+    label: str
+    created_at: datetime
+    monitor_id: str | None = None
+
+    @classmethod
+    def from_run(cls, run: Any) -> "LeadSource":
+        return cls(
+            search_type=run.search_type,
+            run_id=run.id,
+            label=run.original_keyword,
+            created_at=run.created_at,
+            monitor_id=run.monitor_id,
+        )
+
+
 class CompanyRead(BaseSchema):
     id: str
     company_name: str
@@ -380,6 +407,9 @@ class CompanyRead(BaseSchema):
     status: str
     notes: str | None = None
     decision_makers: list[DecisionMakerRead] = Field(default_factory=list)
+    # Where the lead came from. Filled in by the My Leads list; None where a
+    # response does not carry it, or for a lead no search can be traced to.
+    source: LeadSource | None = None
 
 
 # --- My Leads ----------------------------------------------------------------

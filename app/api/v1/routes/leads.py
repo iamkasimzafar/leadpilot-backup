@@ -56,7 +56,8 @@ async def list_leads(
     `q` is applied in the database before paging, so `total`, the page and the
     tab counts all describe the matches across the user's whole list.
     """
-    items, total, counts = await LeadService(db).list_leads(
+    service = LeadService(db)
+    items, total, counts = await service.list_leads(
         current_user.id,
         status=status_filter,
         search=q,
@@ -64,8 +65,14 @@ async def list_leads(
         limit=pagination.limit,
     )
 
+    # Which feature each lead came from, for the source chip on its row.
+    sources = await service.sources_for(items)
+
     return LeadPage(
-        items=[CompanyRead.model_validate(c) for c in items],
+        items=[
+            CompanyRead.model_validate(c).model_copy(update={"source": sources.get(c.id)})
+            for c in items
+        ],
         total=total,
         page=pagination.page,
         per_page=pagination.per_page,

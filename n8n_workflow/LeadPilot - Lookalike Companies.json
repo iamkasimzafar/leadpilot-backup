@@ -313,7 +313,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Split Out hands back {\"body.domains\": \"example.com\"} per item --\n// reshape to {domain: ...} so the rest of this chain matches\n// LeadPilot.json's field name exactly.\nreturn { json: { domain: $json['body.domains'] } };\n"
+        "jsCode": "// Split Out hands back {\"body.domains\": \"example.com\"} per item --\n// reshape to {domain: ...} so the rest of this chain matches\n// LeadPilot.json's field name exactly.\n//\n// This node runs once for ALL items, so it must map over every one of\n// them. `$json` here is only the FIRST item: returning a single object\n// built from it silently dropped every domain after the first.\nreturn $input.all()\n  .map(item => String(item.json['body.domains'] ?? item.json.domains ?? '').trim())\n  .filter(Boolean)\n  .map(domain => ({ json: { domain } }));\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,

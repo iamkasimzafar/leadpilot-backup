@@ -18,6 +18,7 @@ from app.schemas.lead import (
     AddToLeadsResponse,
     DecisionMakerUpdate,
     LeadCounts,
+    LeadSource,
     LeadUpdate,
 )
 from app.services.base import BaseService
@@ -53,6 +54,12 @@ class LeadService(BaseService):
         counts = await self.counts(user_id, search=search)
 
         return items, total, counts
+
+    async def sources_for(self, companies: list[Company]) -> dict[str, LeadSource]:
+        """Where each lead came from, keyed by company id. See first_runs_for."""
+        runs = await self.companies.first_runs_for(companies)
+
+        return {company_id: LeadSource.from_run(run) for company_id, run in runs.items()}
 
     async def counts(self, user_id: str, *, search: str | None = None) -> LeadCounts:
         return LeadCounts(**await self.companies.counts_by_status(user_id, search=search))

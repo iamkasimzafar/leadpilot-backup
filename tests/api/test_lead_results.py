@@ -297,6 +297,56 @@ async def test_an_earlier_run_keeps_its_results_when_a_later_one_refinds_them(
     assert run.json()["companies_found"] == 1
 
 
+async def test_my_leads_shows_the_search_a_lead_came_from(
+    client: AsyncClient, db_session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each lead carries its source: the feature and the search that FIRST
+    found it -- which a later search re-finding the same company must not
+    overwrite."""
+    captured = _mock_n8n(monkeypatch)
+    tokens = await signed_in_tokens(client, db_session)
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+    await _fund(client, headers)
+
+    async def start(keyword: str) -> tuple[str, str]:
+        response = await client.post(
+            SEARCH,
+            json={
+                "original_keyword": keyword,
+                "expanded_keywords": [],
+                "auto_add_to_leads": True,
+            },
+            headers=headers,
+        )
+        assert response.status_code == 200
+
+        return response.json()["run_id"], captured["progress_token"]
+
+    first_run, first_token = await start("LED screen")
+    await _post_results(client, first_run, first_token, companies=[SAMPLE_COMPANY])
+
+    def only_source(listed: httpx.Response) -> dict[str, Any]:
+        assert listed.status_code == 200
+        items = listed.json()["items"]
+        assert len(items) == 1
+
+        return items[0]["source"]
+
+    source = only_source(await client.get(f"{PREFIX}/leads", headers=headers))
+    assert source["search_type"] == "b2b"
+    assert source["run_id"] == first_run
+    assert source["label"] == "LED screen"
+
+    # A second search finds the same company again: the lead still came from
+    # the first one.
+    second_run, second_token = await start("LED display")
+    await _post_results(client, second_run, second_token, companies=[SAMPLE_COMPANY])
+
+    source = only_source(await client.get(f"{PREFIX}/leads", headers=headers))
+    assert source["run_id"] == first_run
+    assert source["label"] == "LED screen"
+
+
 # --- Tolerating the workflow's real-world output ------------------------------
 
 
