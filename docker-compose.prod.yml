@@ -1,54 +1,84 @@
 # Production compose for the aaPanel server.
 #
-# This file lives on the server (as docker-compose.yml in the deploy folder)
-# and is NOT what `docker compose up` uses locally -- docker-compose.yml in the
-# repo root is the local dev stack, with its own database and hot reload.
+# The deploy workflow copies this file to the server (as docker-compose.yml in
+# the deploy folder) on every deploy, so it is the one source of truth for how
+# the stack runs there. It is NOT what `docker compose up` uses locally --
+# docker-compose.yml in the repo root is the local dev stack.
+#
+# Four containers from two images:
+#
+#   api     the FastAPI app (applies migrations on start)
+#   worker  Celery worker, same image: sends due Radar Monitors to n8n
+#   beat    Celery beat, same image: wakes the worker every few minutes
+#   redis   the Celery broker, reachable only on this compose network
 #
 # The image is never built here. GitHub Actions builds and pushes it, and this
 # file only says which tag to run, so a deploy is a pull and a restart.
 #
 # MySQL is aaPanel's own, running on the host rather than in a container, so
 # aaPanel's backups and phpMyAdmin keep working. `host.docker.internal` is what
-# reaches it from inside the container (see extra_hosts below).
+# reaches it from inside the containers (see extra_hosts below).
+
+# Everything the three app containers share. YAML anchors keep the api, worker
+# and beat definitions from drifting apart.
+x-app: &app
+  # Set by the deploy workflow in .env.deploy. Pinned to a commit SHA rather
+  # than :latest so the running version is always identifiable, and so a
+  # restart cannot silently pick up a different build.
+  image: ${LEADPILOT_IMAGE:?set LEADPILOT_IMAGE in .env.deploy}
+  restart: unless-stopped
+
+  # Secrets and settings. Lives beside this file on the server, root-owned
+  # and chmod 600 -- it holds the JWT secret and every provider API key.
+  env_file: .env
+
+  # Docker on Linux does not define this name by default, unlike Desktop.
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+  # The default json-file driver grows without bound and is a common cause
+  # of a full disk months later.
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+x-app-env: &app-env
+  ENVIRONMENT: production
+  DEBUG: "false"
+  # aaPanel's MySQL listens on the host. The containers reach it through the
+  # gateway alias rather than 127.0.0.1, which inside a container means the
+  # container itself.
+  MYSQL_HOST: host.docker.internal
+  # The broker is the redis service on this network.
+  CELERY_BROKER_URL: redis://redis:6379/0
 
 services:
   api:
-    # Set by the deploy workflow in .env.deploy. Pinned to a commit SHA rather
-    # than :latest so the running version is always identifiable, and so a
-    # restart cannot silently pick up a different build.
-    image: ${LEADPILOT_IMAGE:?set LEADPILOT_IMAGE in .env.deploy}
+    <<: *app
     container_name: leadpilot-api
-    restart: unless-stopped
-
-    # Secrets and settings. Lives beside this file on the server, root-owned
-    # and chmod 600 -- it holds the JWT secret and every provider API key.
-    env_file: .env
-
     environment:
-      ENVIRONMENT: production
-      DEBUG: "false"
+      <<: *app-env
+      # The API is the one container that migrates; see docker/entrypoint.sh.
+      RUN_MIGRATIONS: "true"
 
-      # aaPanel's MySQL listens on the host. The container reaches it through
-      # the gateway alias below rather than 127.0.0.1, which inside a container
-      # means the container itself.
-      MYSQL_HOST: host.docker.internal
-
-    # Docker on Linux does not define this name by default, unlike Desktop.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-
-    # Bound to localhost only: aaPanel's nginx terminates TLS and proxies to
-    # this port, so exposing it publicly would bypass both.
+    # Published on every interface by default, because n8n calls back on
+    # PUBLIC_API_URL (http://<server ip>:8000) from inside its own container,
+    # and that address only answers when the port is bound publicly. The
+    # browser does not need it -- the frontend's nginx proxies /api/ to
+    # 127.0.0.1:8000 -- so once PUBLIC_API_URL points at a proxied hostname
+    # instead, set API_BIND=127.0.0.1 in .env.deploy to close it.
     ports:
-      - "127.0.0.1:${API_PORT:-8000}:8000"
+      - "${API_BIND:-0.0.0.0}:${API_PORT:-8000}:8000"
 
     # The readiness probe hits the database, so an unhealthy container means
     # "cannot serve", not merely "process alive".
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health/ready', timeout=4).status == 200 else 1)\""]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/v1/health/ready || exit 1"]
       interval: 30s
       timeout: 10s
-      start_period: 20s
+      start_period: 30s
       retries: 3
 
     # Without a cap, one runaway request can take the whole box down --
@@ -58,10 +88,95 @@ services:
         limits:
           memory: 1g
 
-    # The default json-file driver grows without bound and is a common cause
-    # of a full disk months later.
+  worker:
+    <<: *app
+    container_name: leadpilot-worker
+    # `solo` pool: one process, one task at a time. The dispatcher runs async
+    # SQLAlchemy under asyncio.run, which a forking pool would break, and its
+    # whole job is to trickle monitors out slowly anyway.
+    command:
+      - celery
+      - -A
+      - app.tasks.celery_app
+      - worker
+      - --loglevel=info
+      - --pool=solo
+      - --concurrency=1
+    environment:
+      <<: *app-env
+      RUN_MIGRATIONS: "false"
+    depends_on:
+      redis:
+        condition: service_healthy
+    # The image's own healthcheck probes port 8000, which a worker never
+    # opens. Ask the worker itself instead.
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.tasks.celery_app inspect ping --timeout 10 -d celery@$$(hostname) >/dev/null 2>&1 || exit 1"]
+      interval: 60s
+      timeout: 20s
+      start_period: 60s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  beat:
+    <<: *app
+    container_name: leadpilot-beat
+    command:
+      - celery
+      - -A
+      - app.tasks.celery_app
+      - beat
+      - --loglevel=info
+      # /app is owned by the unprivileged app user, but /tmp is the one place
+      # guaranteed writable whatever the image's layout becomes.
+      - --schedule=/tmp/celerybeat-schedule
+    environment:
+      <<: *app-env
+      RUN_MIGRATIONS: "false"
+    depends_on:
+      redis:
+        condition: service_healthy
+    # Beat opens no port and answers no ping; the inherited port-8000 probe
+    # would only mark it unhealthy forever.
+    healthcheck:
+      disable: true
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  redis:
+    image: redis:7-alpine
+    container_name: leadpilot-redis
+    restart: unless-stopped
+    # No persistence: the schedule lives in MySQL, and a queued tick that is
+    # lost on restart is simply re-asked by the next one. Capped small -- the
+    # queue never holds more than a handful of messages.
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - allkeys-lru
+    # No `ports`: only the worker and beat talk to it, over this network.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
     logging:
       driver: json-file
       options:
-        max-size: "10m"
-        max-file: "5"
+        max-size: "5m"
+        max-file: "2"
+    deploy:
+      resources:
+        limits:
+          memory: 96m

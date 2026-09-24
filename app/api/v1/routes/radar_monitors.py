@@ -1,25 +1,22 @@
-"""Radar Monitors: CRUD for the panel, plus the two endpoints n8n calls.
+"""Radar Monitors: CRUD for the panel, plus the results callback n8n calls.
 
-The scheduler lives in n8n, not here. Its workflow wakes on its own cron, asks
-`GET /monitors/due` what to run, runs each monitor through the same
-Serper -> DeepSeek -> Snov.io pipeline a manual search uses, and posts back to
-`POST /monitors/results`.
+The scheduler is Celery (app/tasks/monitors.py), not n8n and not this module.
+It POSTs each due monitor to the n8n workflow, which runs the same Serper ->
+DeepSeek -> Snov.io pipeline a manual search uses and posts back to
+`POST /monitors/results` here.
 
-Both n8n-facing endpoints are authenticated without a session, because n8n has
-no user: the due list by the shared workflow secret, the results callback by
-the per-monitor token handed out with that monitor.
+That callback is authenticated without a session, because n8n has no user: it
+quotes the per-monitor token the dispatcher sent it.
 """
 
 from fastapi import APIRouter, Header, Query, status
 
 from app.api.deps import CurrentUser, DbSession
-from app.core.config import settings
 from app.core.exceptions import UnauthorizedError
 from app.core.logging import get_logger
 from app.models.radar_monitor import RadarMonitor
 from app.schemas.common import Message
 from app.schemas.radar_monitor import (
-    DueMonitorsResponse,
     MonitorCreateRequest,
     MonitorFilters,
     MonitorListResponse,
@@ -115,37 +112,6 @@ async def delete_monitor(
 
 
 # --- The n8n contract -------------------------------------------------------
-
-
-@router.get("/due", response_model=DueMonitorsResponse)
-async def due_monitors(
-    db: DbSession,
-    limit: int = Query(default=100, ge=1, le=500),
-    shared_secret: str | None = Header(default=None, alias=settings.N8N_WEBHOOK_HEADER),
-) -> DueMonitorsResponse:
-    """The monitors ready to run now, for n8n's Schedule Trigger.
-
-    Handing a monitor out also claims it: each row is stamped with its next
-    run time under a conditional UPDATE, so an overlapping pass -- a retry, or
-    two schedulers -- cannot dispatch the same monitor twice and bill the user
-    twice over.
-
-    Authentication is the shared workflow secret, since the scheduler runs
-    without a user. When N8N_WEBHOOK_SECRET is unset this endpoint refuses
-    everything rather than defaulting open: it hands out per-monitor callback
-    tokens, so an unauthenticated caller could write results into any monitor.
-    """
-    if not settings.N8N_WEBHOOK_SECRET:
-        log.error("radar_monitor.due_rejected", reason="N8N_WEBHOOK_SECRET not set")
-        raise UnauthorizedError("Monitor scheduling is not configured.")
-
-    if shared_secret != settings.N8N_WEBHOOK_SECRET:
-        log.warning("radar_monitor.due_rejected", reason="bad shared secret")
-        raise UnauthorizedError("Invalid workflow secret.")
-
-    monitors = await RadarMonitorService(db).claim_due(limit=limit)
-
-    return DueMonitorsResponse(monitors=monitors, total=len(monitors))
 
 
 @router.post("/results", response_model=MonitorResultsResponse)

@@ -123,6 +123,32 @@ class Settings(BaseSettings):
     N8N_WEBHOOK_HEADER: str = "X-LeadPilot-Token"
     N8N_TIMEOUT: float = 30.0
 
+    # --- Radar Monitors (scheduled searches) --------------------------------
+    # Webhook of the monitor workflow. The scheduler POSTs one monitor per
+    # call; n8n runs the same Serper -> DeepSeek -> Snov.io chain a b2b search
+    # uses and posts the results back. Empty disables dispatch: due monitors
+    # simply wait, and nothing is claimed.
+    N8N_MONITOR_WEBHOOK_URL: str = ""
+    # Celery broker. The worker and beat containers share it with nothing
+    # else, so a plain Redis with no auth on the compose network is fine.
+    CELERY_BROKER_URL: str = "redis://redis:6379/0"
+    # How often beat wakes the dispatcher to look for monitors whose slot has
+    # come round. Slots are chosen to the second, so this is only the
+    # granularity of "on time", not the schedule itself.
+    MONITOR_DISPATCH_INTERVAL_SECONDS: int = 300
+    # Rate control towards n8n: at most BATCH monitors per wake-up, SPACING
+    # seconds apart. Together with the random slots this keeps a large
+    # account's monitors from landing on n8n all at once.
+    MONITOR_DISPATCH_BATCH: int = 10
+    MONITOR_DISPATCH_SPACING_SECONDS: float = 15.0
+    # A brand-new (or just-resumed) monitor runs within this many minutes, so
+    # the user sees it work rather than waiting up to a day for the first
+    # random slot. Later runs get a random second of the next day / week.
+    MONITOR_FIRST_RUN_DELAY_MINUTES: int = 10
+    # When n8n could not be reached, try that monitor again this soon rather
+    # than losing the whole day to a blip.
+    MONITOR_RETRY_MINUTES: int = 30
+
     # Public base URL of THIS api, used to build the progress callback URL sent
     # to n8n. Must be reachable from the n8n host: "http://localhost:8000" only
     # works if n8n runs on the same machine.

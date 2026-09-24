@@ -136,6 +136,14 @@ jobs:
       url: ${{ vars.PUBLIC_API_URL }}
 
     steps:
+      - uses: actions/checkout@v4
+
+      # The compose file travels with the deploy, so how the stack runs on the
+      # server is versioned here rather than hand-edited there. Base64 keeps
+      # it intact through the SSH action's environment passing.
+      - name: Package the compose file
+        run: echo "COMPOSE_B64=$(base64 -w0 docker-compose.prod.yml)" >> "$GITHUB_ENV"
+
       # One SSH session for the whole deploy: pull, migrate, restart, verify,
       # and roll back if the verify fails. Splitting verification into its own
       # step would leave a broken container serving while the workflow moved
@@ -147,12 +155,13 @@ jobs:
           API_PORT: ${{ vars.API_PORT || 8000 }}
           REGISTRY_USER: ${{ github.actor }}
           REGISTRY_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          COMPOSE_B64: ${{ env.COMPOSE_B64 }}
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
           port: ${{ secrets.SSH_PORT || 22 }}
-          envs: IMAGE,API_PORT,REGISTRY_USER,REGISTRY_TOKEN
+          envs: IMAGE,API_PORT,REGISTRY_USER,REGISTRY_TOKEN,COMPOSE_B64
           script_stop: true
           script: |
             set -euo pipefail
@@ -166,6 +175,9 @@ jobs:
             dc() { sudo -n docker compose --env-file .env.deploy "$@"; }
 
             echo "Deploying $IMAGE"
+
+            # The stack definition for this version of the code.
+            echo "$COMPOSE_B64" | base64 -d | sudo -n tee docker-compose.yml >/dev/null
 
             # The compose file reads the image from this variable, so the same
             # file serves every version and a rollback is one line.
@@ -189,15 +201,34 @@ jobs:
               echo "No GHCR_TOKEN set; assuming the package is public." >&2
             fi
 
-            dc pull api
+            # api, worker and beat share one image, so this pulls it once.
+            dc pull api redis
 
-            # Migrations run BEFORE the new container serves traffic: the app
-            # does not migrate on startup, so a schema change would otherwise
-            # meet code expecting it. `run --rm` uses the new image, so this is
-            # the new code's migration against the live database.
-            dc run --rm api alembic upgrade head
+            # Migrations run BEFORE the new containers serve traffic. `run
+            # --rm` uses the new image, so this is the new code's migration
+            # against the live database; RUN_MIGRATIONS=false keeps the
+            # entrypoint from doing it a second time on the way in.
+            dc run --rm -e RUN_MIGRATIONS=false api alembic upgrade head
 
-            dc up -d --no-deps api
+            # All four together: the worker and beat run the same image as
+            # the api and must move with it, or a task would import code the
+            # api no longer has.
+            dc up -d redis
+
+            # A container started by hand (`docker run`) holds the name
+            # leadpilot-api without belonging to this compose project, and
+            # compose refuses to create one with the same name. Take it out of
+            # the way -- renamed, not removed, so it is still there to go back
+            # to -- only when it is not already compose's own.
+            project=$(d inspect leadpilot-api --format '{{ index .Config.Labels "com.docker.compose.project" }}' 2>/dev/null || true)
+            if d inspect leadpilot-api >/dev/null 2>&1 && [ -z "$project" ]; then
+              echo "Retiring hand-started leadpilot-api container"
+              d rm -f leadpilot-api-previous >/dev/null 2>&1 || true
+              d stop leadpilot-api
+              d rename leadpilot-api leadpilot-api-previous
+            fi
+
+            dc up -d --no-deps api worker beat
 
             # Readiness, not liveness: it proves the container can reach MySQL,
             # which is the failure this deploy is most likely to cause.
@@ -212,6 +243,26 @@ jobs:
               sleep 4
             done
 
+            # The worker has no port to probe; its own ping is the check. A
+            # worker that cannot answer within a minute of starting would
+            # never dispatch a monitor, which is a failed deploy too.
+            if [ "$healthy" -eq 1 ]; then
+              worker_ok=0
+              for attempt in $(seq 1 12); do
+                if dc exec -T worker celery -A app.tasks.celery_app inspect ping --timeout 10 >/dev/null 2>&1; then
+                  echo "Worker answered after ${attempt} attempt(s)."
+                  worker_ok=1
+                  break
+                fi
+                sleep 5
+              done
+              if [ "$worker_ok" -ne 1 ]; then
+                echo "::error::Celery worker never answered its ping."
+                dc logs --tail 60 worker beat || true
+                healthy=0
+              fi
+            fi
+
             if [ "$healthy" -ne 1 ]; then
               echo "::error::New image failed its readiness check."
               dc logs --tail 80 api || true
@@ -219,7 +270,7 @@ jobs:
               if [ -n "$PREVIOUS" ]; then
                 echo "Rolling back to $PREVIOUS"
                 sed -i "s|^LEADPILOT_IMAGE=.*|LEADPILOT_IMAGE=$PREVIOUS|" .env.deploy
-                dc up -d --no-deps api
+                dc up -d --no-deps api worker beat
                 # The database is NOT rolled back. Migrations here are
                 # additive, so the previous image tolerates the new schema;
                 # a destructive migration would need a manual restore from

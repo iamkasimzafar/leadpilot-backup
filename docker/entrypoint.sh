@@ -37,8 +37,16 @@ done
 echo "Database is up."
 
 # Idempotent: a no-op when the schema is already current.
-echo "Applying migrations..."
-alembic upgrade head
+#
+# Only the API applies migrations. The Celery worker and beat run from the
+# same image and set RUN_MIGRATIONS=false, so three containers starting at
+# once do not race each other over the same ALTER TABLE.
+if [ "${RUN_MIGRATIONS:-true}" = "true" ]; then
+  echo "Applying migrations..."
+  alembic upgrade head
+else
+  echo "Skipping migrations (RUN_MIGRATIONS=${RUN_MIGRATIONS})."
+fi
 
-echo "Starting the API..."
+echo "Starting: $*"
 exec "$@"

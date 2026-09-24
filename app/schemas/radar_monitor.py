@@ -236,10 +236,17 @@ class DueMonitor(BaseModel):
     # wording behind the HS code.
     search_term: str
 
-    # The same value under the name the shared pipeline nodes already read
-    # (Backlisting tags each result with it; DeepSeek's prompt quotes it).
-    # Keeping their field name means those nodes run unmodified.
+    # The same value under the names the shared pipeline nodes already read:
+    # the first node splits on `expanded_keywords` (one Serper query per
+    # entry), Backlisting tags each result with `original_keyword`, and
+    # DeepSeek's prompt quotes it. Keeping their field names means those nodes
+    # run exactly as they do for a manual search.
     original_keyword: str
+    expanded_keywords: list[str]
+
+    # A monitor targets no company type; the pipeline's OR-group of trade
+    # words is skipped when this is null, same as a manual search with "any".
+    company_type: str | None = None
 
     # The confirmed HS code, for labelling. None for keyword monitors.
     hs_code: str | None

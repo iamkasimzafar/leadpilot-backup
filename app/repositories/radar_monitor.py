@@ -92,6 +92,11 @@ class RadarMonitorRepository(BaseRepository[RadarMonitor]):
                 (RadarMonitor.next_run_at.is_(None)) | (RadarMonitor.next_run_at <= now),
             )
             .values(last_run_at=now, next_run_at=next_run)
+            # No in-Python evaluation of the WHERE against loaded objects: the
+            # database hands datetimes back naive, `now` is aware, and the
+            # comparison raises. The caller updates the object itself once it
+            # knows the claim won.
+            .execution_options(synchronize_session=False)
         )
         # execute() is typed as returning Result, but an UPDATE always yields a
         # CursorResult -- the only kind that carries rowcount, which is the

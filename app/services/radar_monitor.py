@@ -1,15 +1,17 @@
-"""Radar monitors: the saved searches n8n re-runs on a schedule.
+"""Radar monitors: saved searches re-run in the background.
 
 Three jobs live here.
 
 CRUD
     What the Radar Monitors panel calls. A monitor is inert data until the
-    scheduler picks it up.
+    dispatcher picks it up.
 
-The due list
-    n8n's monitor workflow wakes on its own cron, asks for whatever is due,
-    and runs each one. Handing out a monitor also claims it, so an overlapping
-    pass cannot dispatch the same monitor twice.
+Dispatch
+    Called by the Celery beat task every few minutes. Each running monitor
+    carries the random second it next wakes (`next_run_at`); whichever have
+    come round are claimed under a conditional UPDATE and POSTed to the n8n
+    workflow, a few at a time, so an overlapping tick cannot dispatch the
+    same monitor twice and n8n never sees a spike.
 
 Results ingest
     The billing-critical half. Every contact the run found is checked against
@@ -18,15 +20,18 @@ Results ingest
     many times a directory site re-surfaces it.
 """
 
+import asyncio
 import json
+import random
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import NotFoundError, UpstreamError
 from app.core.logging import get_logger
 from app.models.lead import Company, DecisionMaker
 from app.models.lead_search import (
@@ -77,6 +82,48 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+# Seconds in a day: the width of the window a daily monitor's slot is drawn
+# from.
+_DAY = 24 * 60 * 60
+
+# Module-level so tests can seed it. SystemRandom would be overkill: the slot
+# only has to be spread, not unguessable.
+_rng = random.Random()
+
+
+def first_run_slot(now: datetime, rng: random.Random | None = None) -> datetime:
+    """When a brand-new or just-resumed monitor first runs: within the next
+    MONITOR_FIRST_RUN_DELAY_MINUTES, so the user sees it work.
+
+    Never sooner than 30 seconds, so a create-then-pause in quick succession
+    has a moment to land before the dispatcher could pick it up.
+    """
+    ceiling = max(settings.MONITOR_FIRST_RUN_DELAY_MINUTES * 60, 30)
+    delay = (rng or _rng).randint(30, ceiling)
+
+    return now + timedelta(seconds=delay)
+
+
+def next_slot(
+    now: datetime, frequency: str, rng: random.Random | None = None
+) -> datetime:
+    """The random moment a monitor next wakes after running at `now`.
+
+    A daily monitor gets a random second of the next UTC calendar day; a
+    weekly one, of the same weekday next week. Anchoring to the calendar day
+    is what makes "daily" mean daily: a slot chosen as "now plus 24h plus
+    random" would drift later every run, and a monitor that ran at 02:00
+    could wait until 23:59 the day after next. This way every day of a daily
+    monitor's life sees exactly one run, just never at a predictable time.
+    """
+    interval = MonitorFrequency(frequency).interval_days
+    day_start = datetime(now.year, now.month, now.day, tzinfo=UTC) + timedelta(
+        days=interval
+    )
+
+    return day_start + timedelta(seconds=(rng or _rng).randrange(_DAY))
+
+
 @dataclass(frozen=True)
 class IngestTally:
     """What one monitor run actually produced."""
@@ -118,9 +165,9 @@ class RadarMonitorService(BaseService):
             frequency=payload.frequency,
             limit_per_run=payload.limit_per_run,
             status=MonitorStatus.RUNNING.value,
-            # Due immediately: a monitor the user just saved should not wait a
-            # whole day to prove it works.
-            next_run_at=None,
+            # Its first run lands within minutes, so the user sees it work
+            # rather than waiting up to a day for the first random slot.
+            next_run_at=first_run_slot(_utcnow()),
         )
         await self.commit()
 
@@ -202,11 +249,11 @@ class RadarMonitorService(BaseService):
         if payload.status is not None and payload.status != monitor.status:
             monitor.status = payload.status
 
-            # Clearing the schedule means "due as soon as it is eligible".
-            # Resuming should run promptly rather than wait out the rest of
-            # yesterday's interval; a paused monitor is excluded by status, so
-            # the field is moot until it is resumed.
-            monitor.next_run_at = None
+            # Resuming runs promptly rather than waiting out whatever slot was
+            # left over from before the pause. Pausing leaves the slot alone:
+            # status already keeps it out of the dispatcher's query.
+            if payload.status == MonitorStatus.RUNNING.value:
+                monitor.next_run_at = first_run_slot(_utcnow())
 
         await self.commit()
 
@@ -221,109 +268,212 @@ class RadarMonitorService(BaseService):
 
         log.info("radar_monitor.deleted", monitor_id=monitor_id, user_id=user_id)
 
-    # --- The scheduler contract ---------------------------------------------
+    # --- Dispatch -----------------------------------------------------------
 
-    async def claim_due(self, *, limit: int = 100) -> list[DueMonitor]:
-        """Monitors ready to run, claimed as they are handed out.
+    async def dispatch_due(
+        self,
+        *,
+        now: datetime | None = None,
+        limit: int | None = None,
+        spacing: float | None = None,
+        client: httpx.AsyncClient | None = None,
+    ) -> list[DueMonitor]:
+        """Send every monitor whose slot has come round to n8n, one POST each.
 
-        Claiming inside the same call is what makes this safe to poll: if the
-        workflow retries, or two passes overlap, the conditional UPDATE lets
-        exactly one of them take each monitor. A monitor that loses the race
-        is simply left out of the response.
+        Called by the Celery beat task every few minutes. The schedule itself
+        is `next_run_at`: each monitor carries the exact random second it is
+        next meant to wake, so this only has to ask "whose time is it?".
+
+        Claiming happens before the POST, under a conditional UPDATE, and is
+        committed on its own. Two things follow. If two ticks ever overlap,
+        exactly one of them takes each monitor. And if the process dies
+        between the claim and the POST, the monitor is not dispatched twice
+        -- it is simply skipped until its next slot, which is the cheaper
+        mistake: a missed day costs nothing, a doubled one bills twice.
+
+        `spacing` seconds are slept between POSTs, and at most `limit`
+        monitors go per call, so a large account's monitors reach n8n as a
+        steady trickle rather than a spike.
         """
-        now = _utcnow()
+        if not settings.N8N_MONITOR_WEBHOOK_URL:
+            log.warning("radar_monitor.dispatch_disabled", reason="no webhook url")
+
+            return []
+
+        now = now or _utcnow()
+        limit = limit if limit is not None else settings.MONITOR_DISPATCH_BATCH
+        spacing = (
+            spacing if spacing is not None else settings.MONITOR_DISPATCH_SPACING_SECONDS
+        )
+
         due = await self.monitors.due(now, limit=limit)
+        dispatched: list[DueMonitor] = []
 
-        base = settings.PUBLIC_API_URL.rstrip("/")
-        results_url = f"{base}{settings.API_V1_PREFIX}/lead-radar/monitors/results"
+        for index, monitor in enumerate(due):
+            if index and spacing > 0:
+                await asyncio.sleep(spacing)
 
-        claimed: list[DueMonitor] = []
-
-        for monitor in due:
-            interval = MonitorFrequency(monitor.frequency).interval_days
-            next_run = now + timedelta(days=interval)
-
-            if not await self.monitors.claim(monitor, now, next_run):
-                log.info("radar_monitor.claim_lost", monitor_id=monitor.id)
+            payload = await self._claim(monitor, now)
+            if payload is None:
                 continue
 
-            if monitor.started_at is None:
-                monitor.started_at = now
-
-            filters = MonitorFilters(**monitor.filters)
-
-            # An HS-code monitor searches the product wording, not the digits:
-            # almost nobody publishes an HS code on their site, so searching
-            # the code returns tariff pages instead of buyers.
-            is_hs = monitor.search_type == MonitorSearchType.HS_CODE.value
-            search_term = (
-                monitor.search_label or monitor.search_value
-                if is_hs
-                else monitor.search_value
-            )
-
-            # Resolve the catalogue codes here, so the workflow filters on the
-            # real Snov.io titles and employee bounds without carrying a copy
-            # of the catalogue itself.
-            role = filters.contact_role
-            size = filters.company_size
-            titles = role_titles_for(role) if role else None
-            bounds = size_bounds_for(size) if size else None
-
-            # Open a run for this dispatch, so the monitor's work shows up in
-            # Your Searches alongside the user's own searches rather than
-            # happening invisibly overnight.
-            run = LeadSearchRun(
-                user_id=monitor.user_id,
-                search_type=SearchType.MONITOR.value,
-                original_keyword=monitor.name,
-                keyword_count=1,
-                auto_add_to_leads=True,
-                country=filters.country,
-                contact_role=filters.contact_role,
-                company_size=filters.company_size,
-                validate_whatsapp=False,
-                monitor_id=monitor.id,
-                status=RunStatus.RUNNING.value,
-                stage=SearchStage.SEARCHING_COMPANIES.value,
-            )
-            self.db.add(run)
-            await self.db.flush()
-
-            claimed.append(
-                DueMonitor(
-                    monitor_id=monitor.id,
-                    run_id=run.id,
-                    user_id=monitor.user_id,
-                    search_type=monitor.search_type,
-                    search_term=search_term,
-                    original_keyword=search_term,
-                    hs_code=monitor.search_value if is_hs else None,
-                    country=filters.country,
-                    company_size=filters.company_size,
-                    contact_role=filters.contact_role,
-                    contact_role_titles=titles or [],
-                    company_size_min=bounds[0] if bounds else None,
-                    company_size_max=bounds[1] if bounds else None,
-                    validate_whatsapp=False,
-                    limit_per_run=monitor.limit_per_run,
-                    serper_offset=monitor.serper_offset,
-                    # The workflow asks Serper for limit_per_run results per
-                    # page, and the offset advances by that same amount after
-                    # each run, so the two stay in step: offset 100 at 50 a
-                    # page is page 3. Dividing by the current limit also keeps
-                    # it right if the user changes the limit mid-life.
-                    serper_page=(monitor.serper_offset // monitor.limit_per_run) + 1,
-                    results_url=results_url,
-                    progress_token=monitor.callback_token,
+            try:
+                await self._post(payload, client)
+            except UpstreamError as exc:
+                # Give it another go soon rather than losing the whole day to
+                # a blip. The run opened for it is closed as failed so Your
+                # Searches does not show it running forever.
+                monitor.last_error = str(exc)[:500]
+                monitor.next_run_at = now + timedelta(
+                    minutes=settings.MONITOR_RETRY_MINUTES
                 )
+                await self._fail_run(monitor, monitor.last_error, now)
+                await self.commit()
+
+                log.warning(
+                    "radar_monitor.dispatch_failed",
+                    monitor_id=monitor.id,
+                    error=monitor.last_error,
+                )
+                continue
+
+            monitor.last_error = None
+            await self.commit()
+            dispatched.append(payload)
+
+            log.info(
+                "radar_monitor.dispatched",
+                monitor_id=monitor.id,
+                run_id=payload.run_id,
+                next_run_at=monitor.next_run_at,
             )
 
+        return dispatched
+
+    async def _claim(self, monitor: RadarMonitor, now: datetime) -> DueMonitor | None:
+        """Take the monitor for this run and open its search, or None if
+        another tick got there first. Commits, so the claim survives whatever
+        happens to the POST that follows."""
+        slot = next_slot(now, monitor.frequency)
+
+        if not await self.monitors.claim(monitor, now, slot):
+            log.info("radar_monitor.claim_lost", monitor_id=monitor.id)
+
+            return None
+
+        # The ORM object still holds the pre-claim values; line it up with the
+        # row so later writes in this session do not undo the claim.
+        monitor.last_run_at = now
+        monitor.next_run_at = slot
+
+        if monitor.started_at is None:
+            monitor.started_at = now
+
+        filters = MonitorFilters(**monitor.filters)
+
+        # An HS-code monitor searches the product wording, not the digits:
+        # almost nobody publishes an HS code on their site, so searching the
+        # code returns tariff pages instead of buyers.
+        is_hs = monitor.search_type == MonitorSearchType.HS_CODE.value
+        search_term = (
+            monitor.search_label or monitor.search_value
+            if is_hs
+            else monitor.search_value
+        )
+
+        # Resolve the catalogue codes here, so the workflow filters on the real
+        # Snov.io titles and employee bounds without carrying a copy of the
+        # catalogue itself.
+        role = filters.contact_role
+        size = filters.company_size
+        titles = role_titles_for(role) if role else None
+        bounds = size_bounds_for(size) if size else None
+
+        # Open a run for this dispatch, so the monitor's work shows up in Your
+        # Searches alongside the user's own searches rather than happening
+        # invisibly in the background.
+        run = LeadSearchRun(
+            user_id=monitor.user_id,
+            search_type=SearchType.MONITOR.value,
+            original_keyword=monitor.name,
+            keyword_count=1,
+            auto_add_to_leads=True,
+            country=filters.country,
+            contact_role=filters.contact_role,
+            company_size=filters.company_size,
+            validate_whatsapp=False,
+            monitor_id=monitor.id,
+            status=RunStatus.RUNNING.value,
+            stage=SearchStage.SEARCHING_COMPANIES.value,
+        )
+        self.db.add(run)
         await self.commit()
 
-        log.info("radar_monitor.due_claimed", count=len(claimed), considered=len(due))
+        base = settings.PUBLIC_API_URL.rstrip("/")
 
-        return claimed
+        return DueMonitor(
+            monitor_id=monitor.id,
+            run_id=run.id,
+            user_id=monitor.user_id,
+            search_type=monitor.search_type,
+            search_term=search_term,
+            original_keyword=search_term,
+            # The pipeline's first node splits on this list, one Serper query
+            # per entry. A monitor runs exactly one.
+            expanded_keywords=[search_term],
+            hs_code=monitor.search_value if is_hs else None,
+            country=filters.country,
+            company_size=filters.company_size,
+            contact_role=filters.contact_role,
+            contact_role_titles=titles or [],
+            company_size_min=bounds[0] if bounds else None,
+            company_size_max=bounds[1] if bounds else None,
+            validate_whatsapp=False,
+            limit_per_run=monitor.limit_per_run,
+            serper_offset=monitor.serper_offset,
+            # The workflow asks Serper for limit_per_run results per page, and
+            # the offset advances by that same amount after each run, so the
+            # two stay in step: offset 100 at 50 a page is page 3. Dividing by
+            # the current limit also keeps it right if the user changes the
+            # limit mid-life.
+            serper_page=(monitor.serper_offset // monitor.limit_per_run) + 1,
+            results_url=f"{base}{settings.API_V1_PREFIX}/lead-radar/monitors/results",
+            progress_token=monitor.callback_token,
+        )
+
+    async def _post(self, payload: DueMonitor, client: httpx.AsyncClient | None) -> None:
+        """Hand one monitor to the n8n workflow. Raises UpstreamError when n8n
+        could not be reached or refused the job."""
+        url = settings.N8N_MONITOR_WEBHOOK_URL
+        body = payload.model_dump(mode="json")
+
+        headers: dict[str, str] = {}
+        if settings.N8N_WEBHOOK_SECRET:
+            headers[settings.N8N_WEBHOOK_HEADER] = settings.N8N_WEBHOOK_SECRET
+
+        try:
+            if client is not None:
+                response = await client.post(url, json=body, headers=headers)
+            else:
+                async with httpx.AsyncClient(timeout=settings.N8N_TIMEOUT) as owned:
+                    response = await owned.post(url, json=body, headers=headers)
+        except httpx.TimeoutException as exc:
+            raise UpstreamError("The monitor workflow took too long to respond.") from exc
+        except httpx.HTTPError as exc:
+            raise UpstreamError("Could not reach the monitor workflow.") from exc
+
+        if response.status_code == 404 and "not registered" in response.text:
+            # n8n answers this when the workflow is not active: the production
+            # webhook path only exists once it has been switched on.
+            raise UpstreamError(
+                "The monitor workflow is not active in n8n; activate it to "
+                "register its webhook."
+            )
+
+        if response.status_code >= 400:
+            raise UpstreamError(
+                f"The monitor workflow returned HTTP {response.status_code}."
+            )
 
     # --- Results ingest -----------------------------------------------------
 
@@ -404,9 +554,7 @@ class RadarMonitorService(BaseService):
             if not fresh:
                 continue
 
-            company, created = await self._upsert_company(
-                monitor, incoming, now, run_id
-            )
+            company, created = await self._upsert_company(monitor, incoming, now, run_id)
             companies_touched += 1
             if created:
                 companies_saved += 1

@@ -13,7 +13,15 @@ from sqlalchemy.ext.asyncio import (
 from app.core.config import settings
 
 
-def _create_engine() -> AsyncEngine:
+def create_engine() -> AsyncEngine:
+    """A fresh engine for the configured database.
+
+    The module-level `engine` below serves the API. Celery tasks build their
+    own through this instead: each task runs under `asyncio.run`, which opens
+    a new event loop, and asyncmy connections pooled on a previous loop cannot
+    be reused on the next one. A per-task engine, disposed when the task ends,
+    sidesteps that entirely.
+    """
     url = settings.sqlalchemy_database_uri
     kwargs: dict[str, Any] = {"echo": settings.SQL_ECHO, "future": True}
 
@@ -39,7 +47,7 @@ def _create_engine() -> AsyncEngine:
     return create_async_engine(url, **kwargs)
 
 
-engine: AsyncEngine = _create_engine()
+engine: AsyncEngine = create_engine()
 
 SessionLocal: async_sessionmaker[AsyncSession] = async_sessionmaker(
     bind=engine,

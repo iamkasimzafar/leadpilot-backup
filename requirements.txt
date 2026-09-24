@@ -33,6 +33,15 @@ structlog==26.1.0
 # Async client for the DeepSeek API (keyword expansion). Same pin as dev tooling.
 httpx==0.28.1
 
+# --- Background scheduling ---------------------------------------------------
+# Radar Monitors: beat wakes the dispatcher every few minutes, the worker feeds
+# due monitors to n8n at a controlled rate. Redis is the broker; the schedule
+# itself lives in the database (radar_monitors.next_run_at), so nothing is lost
+# if the broker or a worker restarts.
+celery[redis]==5.6.3
+# Pinned to what kombu 5.6 resolves to; redis 8.x is outside its range.
+redis==6.4.0
+
 # --- Exports -----------------------------------------------------------------
 # Writes the .xlsx export of My Leads. CSV needs nothing beyond the stdlib.
 openpyxl==3.1.5

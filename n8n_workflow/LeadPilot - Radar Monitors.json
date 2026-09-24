@@ -1,79 +1,37 @@
 {
+  "id": "KI1AtDZtXlSd3FA5",
   "name": "LeadPilot - Radar Monitors",
   "nodes": [
     {
       "parameters": {
-        "rule": {
-          "interval": [
-            {
-              "field": "cronExpression",
-              "expression": "0 2 * * *"
-            }
-          ]
-        }
-      },
-      "id": "monitor-schedule-trigger",
-      "name": "Daily 02:00 UTC",
-      "type": "n8n-nodes-base.scheduleTrigger",
-      "typeVersion": 1.2,
-      "position": [
-        -640,
-        0
-      ]
-    },
-    {
-      "parameters": {
-        "method": "GET",
-        "url": "http://43.157.81.74:8000/api/v1/lead-radar/monitors/due",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "X-LeadPilot-Token",
-              "value": "JX9C4q7ITD-5uo9WLypjKxJgn7fKDsMKlOPwpGgPhug"
-            }
-          ]
-        },
+        "httpMethod": "POST",
+        "path": "radar-monitor-v1",
         "options": {}
       },
-      "id": "monitor-fetch-due",
-      "name": "Fetch Due Monitors",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
       "position": [
-        -420,
-        0
+        6512,
+        4016
       ],
-      "notes": "The backend claims each monitor as it hands it out, so a retry or an overlapping run cannot dispatch the same monitor twice and bill the user twice over."
+      "id": "36eedb84-c129-491d-ae79-111793823a8d",
+      "name": "Webhook",
+      "webhookId": "37fc342a-9be1-5bbd-a9da-cf2018483fe0",
+      "notes": "Called by the LeadPilot backend's Celery dispatcher, one monitor per call, at that monitor's random daily slot. There is no schedule in n8n."
     },
     {
       "parameters": {
-        "fieldToSplitOut": "monitors",
+        "fieldToSplitOut": "body.expanded_keywords",
         "options": {}
       },
-      "id": "monitor-split",
-      "name": "Split Monitors",
       "type": "n8n-nodes-base.splitOut",
       "typeVersion": 1,
       "position": [
-        -200,
-        0
-      ]
-    },
-    {
-      "parameters": {
-        "options": {
-          "reset": false
-        }
-      },
-      "id": "monitor-loop",
-      "name": "Loop Monitors",
-      "type": "n8n-nodes-base.splitInBatches",
-      "typeVersion": 3,
-      "position": [
-        20,
-        0
-      ]
+        6800,
+        4032
+      ],
+      "id": "b0550b4a-7482-4244-957a-429909489c9e",
+      "name": "Split Out"
     },
     {
       "parameters": {
@@ -94,7 +52,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{\nJSON.stringify((() => {\n  const m = $('Loop Monitors').item.json;\n\n  // `num` must match the page width the backend assumed when it turned\n  // serper_offset into serper_page, or the two drift and the monitor\n  // re-reads ground it has already covered. The backend caps limit_per_run\n  // at 100, which is also Serper's own maximum.\n  const num = Math.min(m.limit_per_run || 50, 100);\n\n  const body = {\n    q: m.search_term,\n    num,\n    // The whole point of the monitor: start where the last run stopped.\n    // Page 1 is offset 0, page 2 is the next `num` results, and so on.\n    page: m.serper_page || 1\n  };\n\n  // Serper reads an empty `gl` as a country filter, not as \"worldwide\", so\n  // the key is left out entirely rather than sent blank.\n  if (m.country) body.gl = m.country;\n\n  return body;\n})())\n}}",
+        "jsonBody": "={{\nJSON.stringify((() => {\n  const keyword = $json['body.expanded_keywords'];\n  const companyType = $('Webhook').item.json.body.company_type;\n\n  // Company-type -> OR-group of search terms buyers of that type use.\n  // Keep in step with LeadPilot_Backend/app/services/company_types.py.\n  const typeTerms = {\n    distributor: ['distributor', 'wholesaler', 'importer', 'trading company', 'stockist'],\n    brand_oem: ['OEM', 'ODM', 'custom manufacturer', 'private label', 'contract manufacturer'],\n    retailer: ['retailer', 'store', 'shop', 'dropshipping', 'reseller'],\n    installer: ['installer', 'contractor', 'system integrator', 'commissioning', 'maintenance']\n  };\n\n  const terms = typeTerms[companyType];\n  const q = terms\n    ? `${keyword} (${terms.map(t => `\"${t}\"`).join(' OR ')})`\n    : keyword;\n\n  return {\n    q,\n    gl: $('Webhook').item.json.body.country,\n    num: Math.min($('Webhook').item.json.body.limit_per_run || 50, 100),\n    // The whole point of the monitor: start where the last run\n    // stopped. Page 1 is offset 0, page 2 the next `num` results.\n    page: $('Webhook').item.json.body.serper_page || 1\n  };\n})())\n}}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -113,7 +71,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const blacklist = [\n  'linkedin.com', 'facebook.com', 'youtube.com', 'instagram.com', 'twitter.com', 'tiktok.com', 'x.com', 'pinterest.com',\n  'alibaba.com', 'amazon.com', 'made-in-china.com', 'globalsources.com', 'thomasnet.com', \n  'yellowpages.com', 'yelp.com', 'trustpilot.com', 'crunchbase.com', 'bloomberg.com', \n  'wikipedia.org', 'reddit.com', 'quora.com', 'medium.com', 'tradeimex.in', 'seair.co.in',\n  'worldbank.org', 'zippia.com', 'unicargo.com', 'ebay.com', 'walmart.com'\n];\n\nconst forbiddenTLDs = ['.gov', '.edu'];\nconst output = [];\n\n// Loop through all incoming Serper keyword outputs\nfor (const item of $input.all()) {\n  const searchResults = item.json.organic || [];\n  const currentKeyword = item.json.searchParameters?.q || $('Loop Monitors').item.json.original_keyword;\n\n  const cleanResults = searchResults.filter(result => {\n    if (!result.link) return false;\n    const url = result.link.toLowerCase();\n    \n    const isBlacklisted = blacklist.some(domain => url.includes(domain));\n    const isForbiddenTLD = forbiddenTLDs.some(tld => url.includes(tld));\n\n    return !isBlacklisted && !isForbiddenTLD;\n  });\n\n  cleanResults.forEach(result => {\n  let hostname = result.link || '';\n  try {\n    // Clean string and strip www.\n    const parsed = new URL(hostname);\n    hostname = parsed.hostname.replace(/^www\\./, '');\n  } catch (e) {\n    // Regex fallback if URL constructor fails\n    hostname = hostname.replace(/^(?:https?:\\/\\/)?(?:www\\.)?([^\\/]+).*/i, '$1');\n  }\n\n  output.push({\n    json: {\n      original_keyword: currentKeyword,\n      url: result.link,\n      title: result.title,\n      snippet: result.snippet,\n      domain: hostname\n    }\n  });\n});\n}\n\nif (!output.length) {\n  throw new Error('LeadPilot Error: no_companies_found - the web search returned no usable company websites for these keywords.');\n}\nreturn output;"
+        "jsCode": "const blacklist = [\n  'linkedin.com', 'facebook.com', 'youtube.com', 'instagram.com', 'twitter.com', 'tiktok.com', 'x.com', 'pinterest.com',\n  'alibaba.com', 'amazon.com', 'made-in-china.com', 'globalsources.com', 'thomasnet.com', \n  'yellowpages.com', 'yelp.com', 'trustpilot.com', 'crunchbase.com', 'bloomberg.com', \n  'wikipedia.org', 'reddit.com', 'quora.com', 'medium.com', 'tradeimex.in', 'seair.co.in',\n  'worldbank.org', 'zippia.com', 'unicargo.com', 'ebay.com', 'walmart.com'\n];\n\nconst forbiddenTLDs = ['.gov', '.edu'];\nconst output = [];\n\n// Loop through all incoming Serper keyword outputs\nfor (const item of $input.all()) {\n  const searchResults = item.json.organic || [];\n  const currentKeyword = item.json.searchParameters?.q || $(\"Webhook\").item.json.body.original_keyword;\n\n  const cleanResults = searchResults.filter(result => {\n    if (!result.link) return false;\n    const url = result.link.toLowerCase();\n    \n    const isBlacklisted = blacklist.some(domain => url.includes(domain));\n    const isForbiddenTLD = forbiddenTLDs.some(tld => url.includes(tld));\n\n    return !isBlacklisted && !isForbiddenTLD;\n  });\n\n  cleanResults.forEach(result => {\n  let hostname = result.link || '';\n  try {\n    // Clean string and strip www.\n    const parsed = new URL(hostname);\n    hostname = parsed.hostname.replace(/^www\\./, '');\n  } catch (e) {\n    // Regex fallback if URL constructor fails\n    hostname = hostname.replace(/^(?:https?:\\/\\/)?(?:www\\.)?([^\\/]+).*/i, '$1');\n  }\n\n  output.push({\n    json: {\n      original_keyword: currentKeyword,\n      url: result.link,\n      title: result.title,\n      snippet: result.snippet,\n      domain: hostname\n    }\n  });\n});\n}\n\nif (!output.length) {\n  throw new Error('LeadPilot Error: no_companies_found - the web search returned no usable company websites for these keywords.');\n}\nreturn output;"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -123,7 +81,7 @@
       ],
       "id": "bb27b68f-5f54-4e2a-9c86-19919885ffdf",
       "name": "Backlisting",
-      "onError": "continueRegularOutput"
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -155,7 +113,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{\nJSON.stringify({\n  \"model\": \"deepseek-chat\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": `You are a B2B data analyst. Review the search result (URL, Title, Snippet).\n\nDetermine: Is this a legitimate, independent B2B company website (NOT a directory, marketplace, blog, news site, or social media profile)?\n\nCompany Type and Company Size are already targeted upstream, in the search query and in later filtering steps -- do not try to judge them here from a short snippet.\n\nRate overall relevance to the keyword on a scale of 1 to 10.\nReturn strictly JSON format: {\"score\": [1-10], \"is_company\": true/false}`\n    },\n    {\n      \"role\": \"user\",\n      \"content\": `Original Keyword: ${$json.original_keyword || $('Loop Monitors').item.json.original_keyword}\\nURL: ${$json.url || $json.link}\\nTitle: ${$json.title}\\nSnippet: ${$json.snippet}`\n    }\n  ],\n  \"response_format\": { \"type\": \"json_object\" }\n})\n}}",
+        "jsonBody": "={{\nJSON.stringify({\n  \"model\": \"deepseek-chat\",\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": `You are a B2B data analyst. Review the search result (URL, Title, Snippet).\n\nDetermine: Is this a legitimate, independent B2B company website (NOT a directory, marketplace, blog, news site, or social media profile)?\n\nCompany Type and Company Size are already targeted upstream, in the search query and in later filtering steps -- do not try to judge them here from a short snippet.\n\nRate overall relevance to the keyword on a scale of 1 to 10.\nReturn strictly JSON format: {\"score\": [1-10], \"is_company\": true/false}`\n    },\n    {\n      \"role\": \"user\",\n      \"content\": `Original Keyword: ${$json.original_keyword || $('Webhook').first().json.body.original_keyword}\\nURL: ${$json.url || $json.link}\\nTitle: ${$json.title}\\nSnippet: ${$json.snippet}`\n    }\n  ],\n  \"response_format\": { \"type\": \"json_object\" }\n})\n}}",
         "options": {
           "batching": {
             "batch": {
@@ -295,7 +253,7 @@
       "parameters": {
         "operation": "startProspectProfiles",
         "domain": "={{ $json.meta.domain }}",
-        "positions": "={{ (() => { const titles = $('Loop Monitors').item.json.contact_role_titles || $('Loop Monitors').item.json.contact_role_titles; return Array.isArray(titles) && titles.length > 0 ? titles.join(',') : \"\"; })() }}"
+        "positions": "={{ (() => { const titles = $('Webhook').first().json.body?.contact_role_titles || $('Webhook').first().json.contact_role_titles; return Array.isArray(titles) && titles.length > 0 ? titles.join(',') : \"\"; })() }}"
       },
       "type": "n8n-nodes-snovio.snovioApi",
       "typeVersion": 1,
@@ -683,7 +641,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const companyMap = {};\n\n// 0. Check if WhatsApp validation was requested from backend Webhook\nconst webhookData = $('Loop Monitors').item.json;\nconst body = webhookData.body || webhookData;\nconst isWhatsappValidationEnabled = body.validate_whatsapp === true;\n\n// Helper to extract last 10 digits for phone lookup\nfunction getPhoneKey(phone) {\n  if (!phone) return '';\n  const digits = String(phone).replace(/[^0-9]/g, '');\n  return digits.length >= 10 ? digits.slice(-10) : digits;\n}\n\n// 1. Build Company Profile Lookup Map from \"Get domain search result\"\nconst companyDetailsMap = {};\ntry {\n  const domainNodes = $('Get domain search result').all();\n  for (const domItem of domainNodes) {\n    const cData = domItem.json.data || domItem.json || {};\n    const site = cData.website || domItem.json.website || cData.domain || domItem.json.domain || '';\n    const domKey = site.replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0].toLowerCase();\n    \n    if (domKey) {\n      companyDetailsMap[domKey] = {\n        company_name: cData.company_name || cData.name || domItem.json.company_name || \"\",\n        company_size: cData.size || cData.company_size || domItem.json.size || domItem.json.company_size || \"N/A\",\n        industry: cData.industry || domItem.json.industry || \"N/A\",\n        hq_phone: cData.hq_phone || cData.company_phone || domItem.json.hq_phone || domItem.json.company_phone || \"\"\n      };\n    }\n  }\n} catch (e) {\n  // Fallback if node was skipped\n}\n\n// 2. Fetch raw profiles for job title fallback lookup\nconst positionLookupMap = {};\ntry {\n  const rawProfiles = $('Get prospect profiles result').all();\n  for (const profileItem of rawProfiles) {\n    const dataList = profileItem.json.data || [];\n    for (const person of dataList) {\n      const fn = (person.first_name || '').trim().toLowerCase();\n      const ln = (person.last_name || '').trim().toLowerCase();\n      const key = `${fn}_${ln}`;\n      if (person.position) {\n        positionLookupMap[key] = person.position;\n      }\n    }\n  }\n} catch (e) {}\n\n// 3. Fetch WhatsApp validation status map (if enabled)\nconst whatsappMap = {};\nif (isWhatsappValidationEnabled) {\n  try {\n    const whatsappResults = $('WhatsApp Validator').all();\n    for (const wa of whatsappResults) {\n      const rawPhone = wa.json.clean_phone || wa.json.phone_number || wa.json.phone || '';\n      const key = getPhoneKey(rawPhone);\n      if (key) {\n        const statusVal = wa.json.status || wa.json.whatsapp_status || \"\";\n        const isExists = wa.json.exists === true || statusVal.toLowerCase() === \"valid\" || statusVal.toLowerCase() === \"exists\" || statusVal.toLowerCase() === \"active\";\n        whatsappMap[key] = isExists ? \"Active\" : \"Not Active\";\n      }\n    }\n  } catch (e) {}\n}\n\n// 4. Process and group prospects from Merge node\nconst enrichedProspects = $('Merge').all();\n\nfor (const item of enrichedProspects) {\n  const data = item.json.data || item.json || {};\n  \n  // Extract email & domain\n  const email = data.emails?.[0]?.email || data.email || item.json.email || '';\n  const domain = email.includes('@') \n    ? email.split('@')[1].toLowerCase() \n    : (item.json.website || '').replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0].toLowerCase();\n  \n  if (!domain) continue;\n\n  // Retrieve original company metadata from domain search lookup map\n  const details = companyDetailsMap[domain] || {};\n\n  // Initialize company entry with true company metadata\n  if (!companyMap[domain]) {\n    companyMap[domain] = {\n      domain: domain,\n      company_name: details.company_name || item.json.company_name || data.company_name || \"\",\n      company_size: details.company_size || item.json.company_size || item.json.employees || data.company_size || \"N/A\",\n      industry: details.industry || item.json.industry || data.industry || \"N/A\",\n      hq_phone: details.hq_phone || item.json.company_phone || data.company_phone || \"\",\n      decision_makers: []\n    };\n  }\n\n  // Extract decision-maker name & position\n  const firstName = data.first_name || item.json.first_name || '';\n  const lastName = data.last_name || item.json.last_name || '';\n  const fullName = `${firstName} ${lastName}`.trim() || 'Decision Maker';\n  const personKey = `${firstName.trim().toLowerCase()}_${lastName.trim().toLowerCase()}`;\n\n  const extractedPosition = \n    data.position || item.json.position || data.job_title || item.json.job_title || positionLookupMap[personKey] || \"N/A\";\n\n  // Determine prospect phone number\n  let prospectPhone = item.json.clean_phone || item.json.phone_number || data.phone || null;\n  if (!prospectPhone && Array.isArray(data.phone_numbers) && data.phone_numbers.length > 0) {\n    prospectPhone = data.phone_numbers[0].phone || null;\n  }\n  if (!prospectPhone) {\n    prospectPhone = companyMap[domain].hq_phone || null;\n  }\n\n  const phoneKey = getPhoneKey(prospectPhone);\n\n  // Toggle WhatsApp Status\n  let whatsappStatus = null;\n  if (isWhatsappValidationEnabled) {\n    if (prospectPhone) {\n      whatsappStatus = (phoneKey && whatsappMap[phoneKey] !== undefined) ? whatsappMap[phoneKey] : \"Not Checked\";\n    } else {\n      whatsappStatus = null;\n    }\n  }\n\n  // Append decision maker\n  companyMap[domain].decision_makers.push({\n    full_name: fullName,\n    job_title: extractedPosition,\n    verified_email: email || null,\n    email_status: data.emails?.[0]?.smtp_status || item.json.smtp_status || \"valid\",\n    linkedin_url: item.json.linkedin_url || data.linkedin_url || item.json.source_page || data.source_page || null,\n    phone_number: prospectPhone || null,\n    whatsapp_status: whatsappStatus\n  });\n}\n\n// Abandon Rule: Silently discard companies with 0 valid decision makers\nconst qualifiedCompanies = Object.values(companyMap).filter(company => company.decision_makers.length > 0);\n\nif (!qualifiedCompanies.length) {\n  throw new Error('LeadPilot Error: no_valid_emails_found - no company was left with a verified decision maker.');\n}\nreturn qualifiedCompanies.map(company => ({ json: { ...company } }));"
+        "jsCode": "const companyMap = {};\n\n// 0. Check if WhatsApp validation was requested from backend Webhook\nconst webhookData = $('Webhook').first().json;\nconst body = webhookData.body || webhookData;\nconst isWhatsappValidationEnabled = body.validate_whatsapp === true;\n\n// Helper to extract last 10 digits for phone lookup\nfunction getPhoneKey(phone) {\n  if (!phone) return '';\n  const digits = String(phone).replace(/[^0-9]/g, '');\n  return digits.length >= 10 ? digits.slice(-10) : digits;\n}\n\n// 1. Build Company Profile Lookup Map from \"Get domain search result\"\nconst companyDetailsMap = {};\ntry {\n  const domainNodes = $('Get domain search result').all();\n  for (const domItem of domainNodes) {\n    const cData = domItem.json.data || domItem.json || {};\n    const site = cData.website || domItem.json.website || cData.domain || domItem.json.domain || '';\n    const domKey = site.replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0].toLowerCase();\n    \n    if (domKey) {\n      companyDetailsMap[domKey] = {\n        company_name: cData.company_name || cData.name || domItem.json.company_name || \"\",\n        company_size: cData.size || cData.company_size || domItem.json.size || domItem.json.company_size || \"N/A\",\n        industry: cData.industry || domItem.json.industry || \"N/A\",\n        hq_phone: cData.hq_phone || cData.company_phone || domItem.json.hq_phone || domItem.json.company_phone || \"\"\n      };\n    }\n  }\n} catch (e) {\n  // Fallback if node was skipped\n}\n\n// 2. Fetch raw profiles for job title fallback lookup\nconst positionLookupMap = {};\ntry {\n  const rawProfiles = $('Get prospect profiles result').all();\n  for (const profileItem of rawProfiles) {\n    const dataList = profileItem.json.data || [];\n    for (const person of dataList) {\n      const fn = (person.first_name || '').trim().toLowerCase();\n      const ln = (person.last_name || '').trim().toLowerCase();\n      const key = `${fn}_${ln}`;\n      if (person.position) {\n        positionLookupMap[key] = person.position;\n      }\n    }\n  }\n} catch (e) {}\n\n// 3. Fetch WhatsApp validation status map (if enabled)\nconst whatsappMap = {};\nif (isWhatsappValidationEnabled) {\n  try {\n    const whatsappResults = $('WhatsApp Validator').all();\n    for (const wa of whatsappResults) {\n      const rawPhone = wa.json.clean_phone || wa.json.phone_number || wa.json.phone || '';\n      const key = getPhoneKey(rawPhone);\n      if (key) {\n        const statusVal = wa.json.status || wa.json.whatsapp_status || \"\";\n        const isExists = wa.json.exists === true || statusVal.toLowerCase() === \"valid\" || statusVal.toLowerCase() === \"exists\" || statusVal.toLowerCase() === \"active\";\n        whatsappMap[key] = isExists ? \"Active\" : \"Not Active\";\n      }\n    }\n  } catch (e) {}\n}\n\n// 4. Process and group prospects from Merge node\nconst enrichedProspects = $('Merge').all();\n\nfor (const item of enrichedProspects) {\n  const data = item.json.data || item.json || {};\n  \n  // Extract email & domain\n  const email = data.emails?.[0]?.email || data.email || item.json.email || '';\n  const domain = email.includes('@') \n    ? email.split('@')[1].toLowerCase() \n    : (item.json.website || '').replace(/^https?:\\/\\//, '').replace(/^www\\./, '').split('/')[0].toLowerCase();\n  \n  if (!domain) continue;\n\n  // Retrieve original company metadata from domain search lookup map\n  const details = companyDetailsMap[domain] || {};\n\n  // Initialize company entry with true company metadata\n  if (!companyMap[domain]) {\n    companyMap[domain] = {\n      domain: domain,\n      company_name: details.company_name || item.json.company_name || data.company_name || \"\",\n      company_size: details.company_size || item.json.company_size || item.json.employees || data.company_size || \"N/A\",\n      industry: details.industry || item.json.industry || data.industry || \"N/A\",\n      hq_phone: details.hq_phone || item.json.company_phone || data.company_phone || \"\",\n      decision_makers: []\n    };\n  }\n\n  // Extract decision-maker name & position\n  const firstName = data.first_name || item.json.first_name || '';\n  const lastName = data.last_name || item.json.last_name || '';\n  const fullName = `${firstName} ${lastName}`.trim() || 'Decision Maker';\n  const personKey = `${firstName.trim().toLowerCase()}_${lastName.trim().toLowerCase()}`;\n\n  const extractedPosition = \n    data.position || item.json.position || data.job_title || item.json.job_title || positionLookupMap[personKey] || \"N/A\";\n\n  // Determine prospect phone number\n  let prospectPhone = item.json.clean_phone || item.json.phone_number || data.phone || null;\n  if (!prospectPhone && Array.isArray(data.phone_numbers) && data.phone_numbers.length > 0) {\n    prospectPhone = data.phone_numbers[0].phone || null;\n  }\n  if (!prospectPhone) {\n    prospectPhone = companyMap[domain].hq_phone || null;\n  }\n\n  const phoneKey = getPhoneKey(prospectPhone);\n\n  // Toggle WhatsApp Status\n  let whatsappStatus = null;\n  if (isWhatsappValidationEnabled) {\n    if (prospectPhone) {\n      whatsappStatus = (phoneKey && whatsappMap[phoneKey] !== undefined) ? whatsappMap[phoneKey] : \"Not Checked\";\n    } else {\n      whatsappStatus = null;\n    }\n  }\n\n  // Append decision maker\n  companyMap[domain].decision_makers.push({\n    full_name: fullName,\n    job_title: extractedPosition,\n    verified_email: email || null,\n    email_status: data.emails?.[0]?.smtp_status || item.json.smtp_status || \"valid\",\n    linkedin_url: item.json.linkedin_url || data.linkedin_url || item.json.source_page || data.source_page || null,\n    phone_number: prospectPhone || null,\n    whatsapp_status: whatsappStatus\n  });\n}\n\n// Abandon Rule: Silently discard companies with 0 valid decision makers\nconst qualifiedCompanies = Object.values(companyMap).filter(company => company.decision_makers.length > 0);\n\nif (!qualifiedCompanies.length) {\n  throw new Error('LeadPilot Error: no_valid_emails_found - no company was left with a verified decision maker.');\n}\nreturn qualifiedCompanies.map(company => ({ json: { ...company } }));"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -693,24 +651,24 @@
       ],
       "id": "b6c81c78-2798-4a54-8507-29720ba81e90",
       "name": "Group Leads & Apply Abandon Rule",
-      "onError": "continueRegularOutput"
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "={{ $('Loop Monitors').item.json.results_url }}",
+        "url": "={{ $('Webhook').first().json.body.results_url }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
             {
               "name": "X-LeadPilot-Run-Token",
-              "value": "={{ $('Loop Monitors').item.json.progress_token }}"
+              "value": "={{ $('Webhook').first().json.body.progress_token }}"
             }
           ]
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{\nJSON.stringify((() => {\n  const companies = $input.all()\n    .map(i => i.json)\n    .filter(c => c && !c.error && c.company_name);\n\n  return {\n    monitor_id: $('Loop Monitors').item.json.monitor_id,\n    run_id: $('Loop Monitors').item.json.run_id,\n    status: 'completed',\n    companies\n  };\n})())\n}}",
+        "jsonBody": "={{\nJSON.stringify((() => {\n  const companies = $input.all()\n    .map(i => i.json)\n    .filter(c => c && !c.error && c.company_name);\n\n  const m = $('Webhook').first().json.body;\n\n  return {\n    monitor_id: m.monitor_id,\n    run_id: m.run_id,\n    status: 'completed',\n    companies\n  };\n})())\n}}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -726,12 +684,11 @@
       "maxTries": 4,
       "waitBetweenTries": 5000,
       "alwaysOutputData": true,
-      "onError": "continueRegularOutput",
-      "notes": "The backend dedupes these contacts against everything the user already has and bills only what is new."
+      "notes": "The backend dedupes these contacts against everything the user already has and bills only what is new. Fed by the normal path and by every empty-stage error output."
     },
     {
       "parameters": {
-        "jsCode": "// 1. Retrieve target min/max boundaries from Webhook payload\nconst webhookData = $('Loop Monitors').item.json;\nconst body = webhookData.body || webhookData;\n\nconst targetMin = body.company_size_min !== undefined && body.company_size_min !== null ? parseInt(body.company_size_min, 10) : null;\nconst targetMax = body.company_size_max !== undefined && body.company_size_max !== null ? parseInt(body.company_size_max, 10) : null;\n\n// Set your hard limit here to control costs\nconst MAX_COMPANIES = 30; \n\n// Helper function to parse size strings like \"11-50\", \"1-10\", \"501+\", \"11 - 50\"\nfunction parseSizeRange(sizeStr) {\n  if (!sizeStr || typeof sizeStr !== 'string') return null;\n\n  const numbers = sizeStr.match(/\\d+/g);\n  if (!numbers || numbers.length === 0) return null;\n\n  if (numbers.length === 1) {\n    const val = parseInt(numbers[0], 10);\n    return { min: val, max: val };\n  }\n\n  return {\n    min: parseInt(numbers[0], 10),\n    max: parseInt(numbers[1], 10)\n  };\n}\n\nconst keptItems = [];\n\nfor (const item of $input.all()) {\n  const companyData = item.json.data || item.json;\n  const companySizeStr = companyData.size || item.json.size;\n\n  // RULE 1: If user selected \"any size\" (targets are null), allow ALL companies immediately\n  if (targetMin === null && targetMax === null) {\n    keptItems.push(item);\n    continue;\n  }\n\n  // RULE 2: Unknown size is not evidence of a bad fit -- Snov.io simply has no\n  // data for this company. Keep it rather than lose a possible hidden gem;\n  // only a confidently-parsed size can disqualify a company below.\n  if (!companySizeStr || companySizeStr.trim() === \"\" || companySizeStr.toLowerCase() === \"n/a\") {\n    keptItems.push(item);\n    continue;\n  }\n\n  // Parse actual company size range\n  const actualRange = parseSizeRange(companySizeStr);\n\n  // If size string could not be parsed into numbers, we are not confident it's\n  // out of range either -- keep it rather than discard on an unreadable value.\n  if (!actualRange) {\n    keptItems.push(item);\n    continue;\n  }\n\n  // Check strict range overlap. Only discard when Snov.io gave us a real,\n  // parsed size range that confidently falls outside the target.\nconst aboveMin = targetMin === null || actualRange.max >= targetMin;\nconst belowMax = targetMax === null || actualRange.min <= targetMax;\nconst isWithinRange = aboveMin && belowMax;\n\n  if (isWithinRange) {\n    keptItems.push(item);\n  }\n}\n\nif (!keptItems.length) {\n  throw new Error(`LeadPilot Error: no_company_size_match - ${$input.all().length} companies were found but none matched the requested company size.`);\n}\nreturn keptItems.slice(0, MAX_COMPANIES);"
+        "jsCode": "// 1. Retrieve target min/max boundaries from Webhook payload\nconst webhookData = $('Webhook').first().json;\nconst body = webhookData.body || webhookData;\n\nconst targetMin = body.company_size_min !== undefined && body.company_size_min !== null ? parseInt(body.company_size_min, 10) : null;\nconst targetMax = body.company_size_max !== undefined && body.company_size_max !== null ? parseInt(body.company_size_max, 10) : null;\n\n// Set your hard limit here to control costs\nconst MAX_COMPANIES = 30; \n\n// Helper function to parse size strings like \"11-50\", \"1-10\", \"501+\", \"11 - 50\"\nfunction parseSizeRange(sizeStr) {\n  if (!sizeStr || typeof sizeStr !== 'string') return null;\n\n  const numbers = sizeStr.match(/\\d+/g);\n  if (!numbers || numbers.length === 0) return null;\n\n  if (numbers.length === 1) {\n    const val = parseInt(numbers[0], 10);\n    return { min: val, max: val };\n  }\n\n  return {\n    min: parseInt(numbers[0], 10),\n    max: parseInt(numbers[1], 10)\n  };\n}\n\nconst keptItems = [];\n\nfor (const item of $input.all()) {\n  const companyData = item.json.data || item.json;\n  const companySizeStr = companyData.size || item.json.size;\n\n  // RULE 1: If user selected \"any size\" (targets are null), allow ALL companies immediately\n  if (targetMin === null && targetMax === null) {\n    keptItems.push(item);\n    continue;\n  }\n\n  // RULE 2: Unknown size is not evidence of a bad fit -- Snov.io simply has no\n  // data for this company. Keep it rather than lose a possible hidden gem;\n  // only a confidently-parsed size can disqualify a company below.\n  if (!companySizeStr || companySizeStr.trim() === \"\" || companySizeStr.toLowerCase() === \"n/a\") {\n    keptItems.push(item);\n    continue;\n  }\n\n  // Parse actual company size range\n  const actualRange = parseSizeRange(companySizeStr);\n\n  // If size string could not be parsed into numbers, we are not confident it's\n  // out of range either -- keep it rather than discard on an unreadable value.\n  if (!actualRange) {\n    keptItems.push(item);\n    continue;\n  }\n\n  // Check strict range overlap. Only discard when Snov.io gave us a real,\n  // parsed size range that confidently falls outside the target.\nconst aboveMin = targetMin === null || actualRange.max >= targetMin;\nconst belowMax = targetMax === null || actualRange.min <= targetMax;\nconst isWithinRange = aboveMin && belowMax;\n\n  if (isWithinRange) {\n    keptItems.push(item);\n  }\n}\n\nif (!keptItems.length) {\n  throw new Error(`LeadPilot Error: no_company_size_match - ${$input.all().length} companies were found but none matched the requested company size.`);\n}\nreturn keptItems.slice(0, MAX_COMPANIES);"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -741,7 +698,7 @@
       ],
       "id": "483ad3ae-6e5d-4a93-aa6e-bed4908b8c21",
       "name": "Filter the companies",
-      "onError": "continueRegularOutput"
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -755,7 +712,7 @@
       ],
       "id": "254fe169-3125-4999-babe-0bb7ccd26555",
       "name": "Filter & Limit Prospects",
-      "onError": "continueRegularOutput"
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -769,7 +726,7 @@
           "conditions": [
             {
               "id": "b8f7db50-f186-4d2b-af9a-b6439ba4dfe7",
-              "leftValue": "={{ $('Loop Monitors').item.json.validate_whatsapp === true && $json._no_phones !== true }}",
+              "leftValue": "={{ $('Webhook').first().json.body?.validate_whatsapp === true && $json._no_phones !== true }}",
               "rightValue": "",
               "operator": {
                 "type": "boolean",
@@ -817,7 +774,7 @@
       "id": "7335f838-db47-42d6-8539-6d1acbd6c3ab",
       "name": "Guard: AI Qualified",
       "executeOnce": false,
-      "onError": "continueRegularOutput"
+      "onError": "continueErrorOutput"
     },
     {
       "parameters": {
@@ -846,11 +803,33 @@
       ],
       "id": "d70fae1b-a4b6-42a8-a703-0270255e7bc6",
       "name": "Guard: Valid Emails",
-      "onError": "continueRegularOutput"
+      "onError": "continueErrorOutput"
     }
   ],
   "pinData": {},
   "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Split Out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out": {
+      "main": [
+        [
+          {
+            "node": "serper",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "serper": {
       "main": [
         [
@@ -867,6 +846,13 @@
         [
           {
             "node": "Remove Duplicates",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Post Monitor Results",
             "type": "main",
             "index": 0
           }
@@ -1137,6 +1123,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Post Monitor Results",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -1148,6 +1141,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Post Monitor Results",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -1156,6 +1156,13 @@
         [
           {
             "node": "Split Out1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Post Monitor Results",
             "type": "main",
             "index": 0
           }
@@ -1199,6 +1206,13 @@
             "type": "main",
             "index": 0
           }
+        ],
+        [
+          {
+            "node": "Post Monitor Results",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
@@ -1221,59 +1235,10 @@
             "type": "main",
             "index": 0
           }
-        ]
-      ]
-    },
-    "Daily 02:00 UTC": {
-      "main": [
+        ],
         [
           {
-            "node": "Fetch Due Monitors",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Fetch Due Monitors": {
-      "main": [
-        [
-          {
-            "node": "Split Monitors",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Split Monitors": {
-      "main": [
-        [
-          {
-            "node": "Loop Monitors",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Loop Monitors": {
-      "main": [
-        [],
-        [
-          {
-            "node": "serper",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Post Monitor Results": {
-      "main": [
-        [
-          {
-            "node": "Loop Monitors",
+            "node": "Post Monitor Results",
             "type": "main",
             "index": 0
           }
